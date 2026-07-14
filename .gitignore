@@ -1,5 +1,6 @@
 # Dependencies
 node_modules/
+.npm-cache/
 
 # Build output
 dist/
@@ -25,6 +26,30 @@ backups/
 *.cache
 .env
 .env.*
+.npmrc
+*.pem
+*.pfx
+*.p12
+*.sqlite
+*.sqlite-*
+*.db
+*.db-*
+*.har
+user-exports/
+public/fonts/MiSans-Regular.woff2
+wallpaper-engine/**/app/fonts/MiSans-Regular.woff2
+
+# Electron / Chromium profile data must never enter source control
+User Data/
+Local Storage/
+Session Storage/
+IndexedDB/
+Network/
+Partitions/
+Cookies
+Cookies-journal
+Preferences
+History
 
 # Local development noise
 .DS_Store

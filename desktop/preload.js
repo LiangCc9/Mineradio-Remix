@@ -38,7 +38,7 @@ contextBridge.exposeInMainWorld('desktopWindow', {
     return () => ipcRenderer.removeListener('mineradio-desktop-lyrics-enabled-state', listener);
   },
   setWallpaperMode: (enabled, payload) => ipcRenderer.invoke('mineradio-wallpaper-set-enabled', !!enabled, payload || {}),
-  updateWallpaperMode: (payload) => ipcRenderer.invoke('mineradio-wallpaper-update', payload || {}),
+  pushWallpaperState: (payload) => ipcRenderer.send('mineradio-wallpaper-state-push', payload || {}),
   onStateChange: (callback) => {
     const listener = (_event, state) => callback(state);
     ipcRenderer.on('desktop-window-state', listener);

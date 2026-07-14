@@ -43,8 +43,15 @@ function resolveRcedit(projectDir) {
 module.exports = async function afterPack(context) {
   if (context.electronPlatformName !== 'win32') return;
 
-  const appName = context.packager.appInfo.productFilename || 'Mineradio';
-  const exePath = path.join(context.appOutDir, `${appName}.exe`);
+  const appName = context.packager.appInfo.productName || context.packager.appInfo.productFilename || 'Mineradio Remix';
+  const configuredExeName = (context.packager.platformSpecificBuildOptions && context.packager.platformSpecificBuildOptions.executableName)
+    || (context.packager.config && context.packager.config.win && context.packager.config.win.executableName)
+    || context.packager.appInfo.productFilename
+    || 'MineradioRemix';
+  const exeCandidates = [configuredExeName, context.packager.appInfo.productFilename, appName]
+    .filter(Boolean)
+    .map(function(name) { return path.join(context.appOutDir, `${name}.exe`); });
+  const exePath = exeCandidates.find(function(candidate) { return fs.existsSync(candidate); }) || exeCandidates[0];
   const iconPath = path.join(context.packager.info.buildResourcesDir, 'icon.ico');
   const rceditPath = resolveRcedit(context.packager.projectDir);
 
@@ -56,10 +63,10 @@ module.exports = async function afterPack(context) {
   execFileSync(rceditPath, [
     exePath,
     '--set-icon', iconPath,
-    '--set-version-string', 'FileDescription', 'Mineradio',
-    '--set-version-string', 'ProductName', 'Mineradio',
-    '--set-version-string', 'CompanyName', 'Mineradio',
-    '--set-version-string', 'OriginalFilename', `${appName}.exe`,
+    '--set-version-string', 'FileDescription', appName,
+    '--set-version-string', 'ProductName', appName,
+    '--set-version-string', 'CompanyName', 'LiangCc9',
+    '--set-version-string', 'OriginalFilename', path.basename(exePath),
     '--set-file-version', version,
     '--set-product-version', version
   ], { stdio: 'inherit' });

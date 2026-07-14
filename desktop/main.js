@@ -1,4 +1,5 @@
 const { app, BrowserWindow, ipcMain, shell, screen, session, globalShortcut, dialog } = require('electron');
+const http = require('http');
 const net = require('net');
 const path = require('path');
 const fs = require('fs');
@@ -19,6 +20,20 @@ let desktopLyricsHotBounds = null;
 let desktopLyricsLastMiddleAt = 0;
 let wallpaperWindow = null;
 let wallpaperState = {};
+let wallpaperAttachToken = 0;
+let wallpaperWorkerWAttached = false;
+let wallpaperSequence = 0;
+let wallpaperAttachPromise = null;
+let wallpaperRecoveryTimer = null;
+let wallpaperHealthTimer = null;
+let wallpaperLastAttachDiagnostic = null;
+let wallpaperEngineBridgeServer = null;
+let wallpaperEngineBridgeStartPromise = null;
+let wallpaperEngineBridgeKeepAliveTimer = null;
+const wallpaperEngineBridgeClients = new Set();
+let wallpaperEngineHostLaunchPromise = null;
+let wallpaperEngineHostLastAttemptAt = 0;
+let wallpaperEngineHostLastResult = null;
 let htmlFullscreenActive = false;
 let windowFullscreenActive = false;
 let mainWindowStateTimer = null;
@@ -29,9 +44,13 @@ const WINDOWED_SCALE = 3 / 4;
 const WINDOWED_MARGIN = 32;
 const MIN_WINDOWED_WIDTH = 960;
 const MIN_WINDOWED_HEIGHT = 540;
-const APP_NAME = 'Mineradio';
-const APP_USER_MODEL_ID = 'com.mineradio.desktop';
+const APP_NAME = 'Mineradio Remix';
+const APP_USER_MODEL_ID = 'com.liangcc9.mineradio.remix';
 const APP_ICON_ICO = path.join(__dirname, '..', 'build', 'icon.ico');
+const WALLPAPER_ENGINE_BRIDGE_HOST = '127.0.0.1';
+const WALLPAPER_ENGINE_BRIDGE_PORT = 17368;
+const WALLPAPER_ENGINE_BRIDGE_MODE = 'wallpaper-engine-bridge';
+const WALLPAPER_ENGINE_HOST_RETRY_MS = 5000;
 const NETEASE_LOGIN_PARTITION = 'persist:mineradio-netease-login';
 const NETEASE_LOGIN_URL = 'https://music.163.com/#/login';
 const QQ_LOGIN_PARTITION = 'persist:mineradio-qqmusic-login';
@@ -287,7 +306,7 @@ function ensureDesktopShortcut() {
       target,
       cwd: path.dirname(target),
       args: '',
-      description: 'Mineradio desktop music player',
+      description: 'Mineradio Remix desktop music player',
       icon: fs.existsSync(APP_ICON_ICO) ? APP_ICON_ICO : target,
       iconIndex: 0,
       appUserModelId: APP_USER_MODEL_ID,
@@ -816,6 +835,7 @@ function startDesktopLyricsMousePoller() {
 $ErrorActionPreference = "SilentlyContinue"
 Add-Type @"
 using System;
+using System.Text;
 using System.Runtime.InteropServices;
 public class MineradioMousePoll {
   [DllImport("user32.dll")] public static extern short GetAsyncKeyState(int vKey);
@@ -978,80 +998,773 @@ function closeDesktopLyricsWindow() {
 
 function nativeWindowHandleDecimal(win) {
   const handle = win.getNativeWindowHandle();
-  if (process.arch === 'x64') return handle.readBigUInt64LE(0).toString();
-  return String(handle.readUInt32LE(0));
+  // HWND follows the process pointer width. Windows ARM64 is 64-bit too; only
+  // ia32 may safely read the four-byte form.
+  if (process.arch === 'ia32') return String(handle.readUInt32LE(0));
+  return handle.readBigUInt64LE(0).toString();
 }
 
-function attachWallpaperToWorkerW(win) {
-  if (process.platform !== 'win32' || !win || win.isDestroyed()) return;
+function writeWallpaperAttachDiagnostic(diagnostic = {}) {
+  try {
+    const safe = {
+      at: new Date().toISOString(),
+      ok: diagnostic.ok === true,
+      mode: String(diagnostic.mode || ''),
+      error: String(diagnostic.error || '').slice(0, 2400),
+      attempt: Number(diagnostic.attempt) || 0,
+      target: String(diagnostic.target || ''),
+      host: String(diagnostic.host || ''),
+      parent: String(diagnostic.parent || ''),
+      shell: String(diagnostic.shell || ''),
+      icon: String(diagnostic.icon || ''),
+      worker: String(diagnostic.worker || ''),
+      width: Number(diagnostic.width) || 0,
+      height: Number(diagnostic.height) || 0,
+      visible: diagnostic.visible === true,
+      raised: diagnostic.raised === true,
+    };
+    fs.writeFileSync(
+      path.join(app.getPath('userData'), 'wallpaper-attach-diagnostic.json'),
+      JSON.stringify(safe, null, 2),
+      'utf8'
+    );
+  } catch (e) {}
+}
+
+function captureWallpaperRendererDiagnostic(win) {
+  if (!win || win.isDestroyed() || win.__mineradioDiagnosticCaptureScheduled) return;
+  win.__mineradioDiagnosticCaptureScheduled = true;
+  setTimeout(async () => {
+    if (!win || win.isDestroyed()) return;
+    try {
+      const state = await win.webContents.executeJavaScript(`(() => ({
+        at: new Date().toISOString(),
+        href: location.href,
+        readyState: document.readyState,
+        surface: window.__MINERADIO_SURFACE__ || '',
+        htmlClass: document.documentElement.className,
+        bodyClass: document.body ? document.body.className : '',
+        bodyParticles: document.body ? document.body.getAttribute('data-wallpaper-particles') : '',
+        wallpaper: window.__mineradioWallpaperSurface ? {
+          ready: !!window.__mineradioWallpaperSurface.state.ready,
+          enabled: !!window.__mineradioWallpaperSurface.state.enabled,
+          sequence: Number(window.__mineradioWallpaperSurface.state.sequence) || 0,
+          trackKey: String(window.__mineradioWallpaperSurface.state.trackKey || ''),
+          receivedAt: Number(window.__mineradioWallpaperSurface.state.receivedAt) || 0
+        } : null,
+        canvas: Array.from(document.querySelectorAll('canvas')).slice(0, 8).map((node) => ({
+          id: node.id || '', width: node.width || 0, height: node.height || 0,
+          clientWidth: node.clientWidth || 0, clientHeight: node.clientHeight || 0
+        }))
+      }))()`);
+      fs.writeFileSync(
+        path.join(app.getPath('userData'), 'wallpaper-render-diagnostic.json'),
+        JSON.stringify(state || {}, null, 2),
+        'utf8'
+      );
+      const image = await win.webContents.capturePage();
+      if (image && !image.isEmpty()) {
+        fs.writeFileSync(path.join(app.getPath('userData'), 'wallpaper-render-diagnostic.png'), image.toPNG());
+      }
+    } catch (e) {
+      try {
+        fs.writeFileSync(
+          path.join(app.getPath('userData'), 'wallpaper-render-diagnostic.json'),
+          JSON.stringify({ at: new Date().toISOString(), error: String(e && e.message || e || 'CAPTURE_FAILED') }, null, 2),
+          'utf8'
+        );
+      } catch (ignored) {}
+    }
+  }, 1600);
+}
+
+function attachWallpaperToWorkerW(win, attemptNumber, done) {
+  if (process.platform !== 'win32' || !win || win.isDestroyed()) {
+    if (typeof done === 'function') done(false, { error: 'UNSUPPORTED_WALLPAPER_HOST' });
+    return;
+  }
   const hwnd = nativeWindowHandleDecimal(win);
+  const displayBounds = screen.getPrimaryDisplay().bounds;
   const script = `
 $ErrorActionPreference = "Stop"
 if (-not ("MineradioNativeWin" -as [type])) {
 Add-Type @"
 using System;
+using System.Text;
 using System.Runtime.InteropServices;
 public class MineradioNativeWin {
   public delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
   [DllImport("user32.dll", SetLastError=true)] public static extern IntPtr FindWindow(string lpClassName, string lpWindowName);
+  [DllImport("user32.dll", SetLastError=true)] public static extern IntPtr GetShellWindow();
   [DllImport("user32.dll", SetLastError=true)] public static extern IntPtr FindWindowEx(IntPtr parent, IntPtr childAfter, string className, string windowName);
   [DllImport("user32.dll", SetLastError=true)] public static extern bool EnumWindows(EnumWindowsProc lpEnumFunc, IntPtr lParam);
   [DllImport("user32.dll", SetLastError=true)] public static extern IntPtr SetParent(IntPtr hWndChild, IntPtr hWndNewParent);
+  [DllImport("user32.dll", SetLastError=true)] public static extern IntPtr GetParent(IntPtr hWnd);
+  [DllImport("user32.dll", SetLastError=true)] public static extern int GetClassName(IntPtr hWnd, StringBuilder className, int maxCount);
+  [DllImport("user32.dll", SetLastError=true)] public static extern int GetWindowLong(IntPtr hWnd, int nIndex);
+  [DllImport("user32.dll", SetLastError=true)] public static extern int SetWindowLong(IntPtr hWnd, int nIndex, int dwNewLong);
   [DllImport("user32.dll", SetLastError=true)] public static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int X, int Y, int cx, int cy, uint uFlags);
+  [DllImport("user32.dll", SetLastError=true)] public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+  [DllImport("user32.dll", SetLastError=true)] public static extern bool IsWindow(IntPtr hWnd);
+  [DllImport("user32.dll", SetLastError=true)] public static extern bool IsWindowVisible(IntPtr hWnd);
+  [DllImport("user32.dll", SetLastError=true)] public static extern bool GetClientRect(IntPtr hWnd, out RECT lpRect);
+  [DllImport("user32.dll", SetLastError=true)] public static extern bool RedrawWindow(IntPtr hWnd, IntPtr updateRect, IntPtr updateRegion, uint flags);
   [DllImport("user32.dll", SetLastError=true)] public static extern IntPtr SendMessageTimeout(IntPtr hWnd, uint Msg, IntPtr wParam, IntPtr lParam, uint fuFlags, uint uTimeout, out IntPtr lpdwResult);
+  [StructLayout(LayoutKind.Sequential)] public struct RECT { public int Left; public int Top; public int Right; public int Bottom; }
 }
 "@
 }
 $progman = [MineradioNativeWin]::FindWindow("Progman", $null)
+$shellWindow = [MineradioNativeWin]::GetShellWindow()
+$messageHost = if ($progman -ne [IntPtr]::Zero) { $progman } else { $shellWindow }
+if ($messageHost -eq [IntPtr]::Zero) { throw "Windows desktop shell window was not found" }
+
+# Windows 11 24H2 and newer use the raised-desktop path (0xD, 0/1), while
+# older Explorer builds may still require the legacy zero-parameter message.
+# Do not send the legacy message on 24H2+: it can rebuild/cover the raised host
+# we just requested on some Insider Explorer builds.
 $result = [IntPtr]::Zero
-[MineradioNativeWin]::SendMessageTimeout($progman, 0x052C, [IntPtr]::Zero, [IntPtr]::Zero, 0, 1000, [ref]$result) | Out-Null
-$script:workerw = [IntPtr]::Zero
+[MineradioNativeWin]::SendMessageTimeout($messageHost, 0x052C, [IntPtr]::new(0xD), [IntPtr]::Zero, 0, 1000, [ref]$result) | Out-Null
+[MineradioNativeWin]::SendMessageTimeout($messageHost, 0x052C, [IntPtr]::new(0xD), [IntPtr]::new(1), 0, 1000, [ref]$result) | Out-Null
+$osBuild = [Environment]::OSVersion.Version.Build
+if ($osBuild -lt 26100) {
+  [MineradioNativeWin]::SendMessageTimeout($messageHost, 0x052C, [IntPtr]::Zero, [IntPtr]::Zero, 0, 1000, [ref]$result) | Out-Null
+}
+Start-Sleep -Milliseconds 70
+
+$script:shellView = [IntPtr]::Zero
+$script:shellTop = [IntPtr]::Zero
+$script:classicWorker = [IntPtr]::Zero
+$script:firstVisibleEmptyWorker = [IntPtr]::Zero
+$script:firstEmptyWorker = [IntPtr]::Zero
 $enum = [MineradioNativeWin+EnumWindowsProc]{
   param([IntPtr]$top, [IntPtr]$param)
   $shell = [MineradioNativeWin]::FindWindowEx($top, [IntPtr]::Zero, "SHELLDLL_DefView", $null)
   if ($shell -ne [IntPtr]::Zero) {
-    $script:workerw = [MineradioNativeWin]::FindWindowEx([IntPtr]::Zero, $top, "WorkerW", $null)
+    if ($script:shellView -eq [IntPtr]::Zero) {
+      $script:shellView = $shell
+      $script:shellTop = $top
+      $script:classicWorker = [MineradioNativeWin]::FindWindowEx([IntPtr]::Zero, $top, "WorkerW", $null)
+    }
+  } else {
+    $className = New-Object System.Text.StringBuilder 64
+    [MineradioNativeWin]::GetClassName($top, $className, $className.Capacity) | Out-Null
+    if ($className.ToString() -eq "WorkerW") {
+      if ($script:firstEmptyWorker -eq [IntPtr]::Zero) { $script:firstEmptyWorker = $top }
+      if ($script:firstVisibleEmptyWorker -eq [IntPtr]::Zero -and [MineradioNativeWin]::IsWindowVisible($top)) {
+        $script:firstVisibleEmptyWorker = $top
+      }
+    }
   }
   return $true
 }
 [MineradioNativeWin]::EnumWindows($enum, [IntPtr]::Zero) | Out-Null
-if ($script:workerw -eq [IntPtr]::Zero) { $script:workerw = $progman }
+
+# On raised desktop builds SHELLDLL_DefView can be a layered child of Progman
+# or of the handle returned by GetShellWindow (newer Explorer builds may not
+# expose a top-level window whose class is literally "Progman"). In either
+# layout, parent beside the icon view. Classic builds continue to use the empty
+# WorkerW after DefView.
+$shellParent = if ($script:shellView -ne [IntPtr]::Zero) { [MineradioNativeWin]::GetParent($script:shellView) } else { [IntPtr]::Zero }
+$raisedWallpaperWorker = [IntPtr]::Zero
+if ($shellParent -ne [IntPtr]::Zero) {
+  $workerCursor = [IntPtr]::Zero
+  while ($true) {
+    $workerCursor = [MineradioNativeWin]::FindWindowEx($shellParent, $workerCursor, "WorkerW", $null)
+    if ($workerCursor -eq [IntPtr]::Zero) { break }
+    if ([MineradioNativeWin]::IsWindowVisible($workerCursor)) {
+      $raisedWallpaperWorker = $workerCursor
+      break
+    }
+  }
+}
+$iconView = if ($script:shellView -ne [IntPtr]::Zero) { [MineradioNativeWin]::FindWindowEx($script:shellView, [IntPtr]::Zero, "SysListView32", "FolderView") } else { [IntPtr]::Zero }
+if ($iconView -eq [IntPtr]::Zero -and $script:shellView -ne [IntPtr]::Zero) {
+  $iconView = [MineradioNativeWin]::FindWindowEx($script:shellView, [IntPtr]::Zero, "SysListView32", $null)
+}
+if ($iconView -eq [IntPtr]::Zero -and $script:shellView -ne [IntPtr]::Zero) {
+  $iconView = [MineradioNativeWin]::FindWindowEx($script:shellView, [IntPtr]::Zero, "DirectUIHWND", $null)
+}
+$shellHostEx = if ($shellParent -ne [IntPtr]::Zero) { [MineradioNativeWin]::GetWindowLong($shellParent, -20) } else { 0 }
+$shellEx = if ($script:shellView -ne [IntPtr]::Zero) { [MineradioNativeWin]::GetWindowLong($script:shellView, -20) } else { 0 }
+$raisedDesktop = $script:shellView -ne [IntPtr]::Zero -and $shellParent -ne [IntPtr]::Zero -and (
+  ($progman -eq [IntPtr]::Zero) -or
+  ($shellParent -eq $progman) -or
+  ($shellWindow -ne [IntPtr]::Zero -and $shellParent -eq $shellWindow) -or
+  (($shellHostEx -band 0x00200000) -ne 0) -or
+  (($shellEx -band 0x00080000) -ne 0)
+)
+$wallpaperHost = [IntPtr]::Zero
+$insertAfter = [IntPtr]::new(1)
+$mode = ""
+if ($raisedDesktop) {
+  # Windows 11's raised desktop keeps a full-size child WorkerW under Progman:
+  # that WorkerW paints the stock wallpaper, while DefView/SysListView32 remain
+  # a sibling icon layer above it. A child of this WorkerW is therefore above
+  # the stock image but still below desktop icons.
+  if ($raisedWallpaperWorker -ne [IntPtr]::Zero) {
+    $wallpaperHost = $raisedWallpaperWorker
+    $insertAfter = [IntPtr]::new(1)
+    $mode = "raised-workerw-child"
+  } else {
+    $wallpaperHost = $script:shellView
+    $insertAfter = if ($iconView -ne [IntPtr]::Zero) { $iconView } else { [IntPtr]::new(1) }
+    $mode = "raised-defview-fallback"
+  }
+} elseif ($script:classicWorker -ne [IntPtr]::Zero) {
+  $wallpaperHost = $script:classicWorker
+  $mode = "classic-workerw"
+} elseif ($script:firstVisibleEmptyWorker -ne [IntPtr]::Zero) {
+  $wallpaperHost = $script:firstVisibleEmptyWorker
+  $mode = "visible-workerw"
+} elseif ($script:firstEmptyWorker -ne [IntPtr]::Zero) {
+  $wallpaperHost = $script:firstEmptyWorker
+  $mode = "workerw-fallback"
+} elseif ($script:shellView -ne [IntPtr]::Zero -and $shellParent -ne [IntPtr]::Zero) {
+  $wallpaperHost = $shellParent
+  $insertAfter = $script:shellView
+  $mode = "shell-parent"
+} elseif ($shellWindow -ne [IntPtr]::Zero) {
+  $wallpaperHost = $shellWindow
+  $mode = "shell-window-fallback"
+} else {
+  $wallpaperHost = $progman
+  $mode = "progman-fallback"
+}
+if ($wallpaperHost -eq [IntPtr]::Zero -or -not [MineradioNativeWin]::IsWindow($wallpaperHost)) { throw "Windows desktop wallpaper host was not found" }
+
 $target = [IntPtr]::new([Int64]${hwnd})
-[MineradioNativeWin]::SetParent($target, $script:workerw) | Out-Null
-[MineradioNativeWin]::SetWindowPos($target, [IntPtr]::Zero, 0, 0, 0, 0, 0x0013) | Out-Null
+if (-not [MineradioNativeWin]::IsWindow($target)) { throw "Wallpaper HWND is no longer valid" }
+[MineradioNativeWin]::ShowWindow($wallpaperHost, 8) | Out-Null
+$setParentResult = [MineradioNativeWin]::SetParent($target, $wallpaperHost)
+$setParentError = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
+
+# SetParent does not update WS_POPUP / WS_CHILD itself.  Keeping Electron's
+# top-level WS_POPUP style makes Windows' "Show desktop" hide the overlay even
+# though its HWND has a WorkerW parent.  Make it a real child/tool window so it
+# behaves like wallpaper and remains behind the desktop icons.
+$style = [MineradioNativeWin]::GetWindowLong($target, -16)
+$style = ($style -band 0x7FFFFFFF) -bor 0x40000000
+[MineradioNativeWin]::SetWindowLong($target, -16, $style) | Out-Null
+$exStyle = [MineradioNativeWin]::GetWindowLong($target, -20)
+# Electron creates transparent top-level windows with WS_EX_LAYERED and
+# WS_EX_NOREDIRECTIONBITMAP. Once reparented into Explorer those flags can keep
+# Chromium's DirectComposition surface alive internally while preventing it
+# from being submitted into the desktop child-window tree. Clear both together
+# with the top-level-only bits; click-through is still enforced by Electron.
+$exStyle = ($exStyle -band (-bnot 0x002C0008)) -bor 0x08000080
+[MineradioNativeWin]::SetWindowLong($target, -20, $exStyle) | Out-Null
+$appliedStyle = [MineradioNativeWin]::GetWindowLong($target, -16)
+if (($appliedStyle -band 0x40000000) -eq 0 -or ($appliedStyle -band 0x80000000) -ne 0) {
+  throw "Wallpaper window styles did not switch from WS_POPUP to WS_CHILD"
+}
+$parent = [MineradioNativeWin]::GetParent($target)
+if ($parent -ne $wallpaperHost) {
+  throw ("SetParent did not attach the wallpaper window to the selected desktop host; target={0}; host={1}; returned={2}; parent={3}; win32={4}; mode={5}; shell={6}; shellParent={7}" -f $target.ToInt64(), $wallpaperHost.ToInt64(), $setParentResult.ToInt64(), $parent.ToInt64(), $setParentError, $mode, $script:shellView.ToInt64(), $shellParent.ToInt64())
+}
+
+$client = New-Object MineradioNativeWin+RECT
+$clientOk = [MineradioNativeWin]::GetClientRect($wallpaperHost, [ref]$client)
+$width = if ($clientOk -and ($client.Right - $client.Left) -gt 0) { $client.Right - $client.Left } else { ${displayBounds.width} }
+$height = if ($clientOk -and ($client.Bottom - $client.Top) -gt 0) { $client.Bottom - $client.Top } else { ${displayBounds.height} }
+
+# Apply the style, size, z-order and visibility atomically.  Native ShowWindow
+# is required here because Electron created the BrowserWindow with show:false;
+# relying on BrowserWindow.showInactive after reparenting is unreliable on
+# raised desktop builds and can also disturb the icon-layer z-order.
+$positioned = [MineradioNativeWin]::SetWindowPos($target, $insertAfter, 0, 0, $width, $height, 0x0070)
+if (-not $positioned) { throw "SetWindowPos failed while finalizing the wallpaper window" }
+[MineradioNativeWin]::ShowWindow($target, 8) | Out-Null
+[MineradioNativeWin]::RedrawWindow($target, [IntPtr]::Zero, [IntPtr]::Zero, 0x0101) | Out-Null
+$visible = [MineradioNativeWin]::IsWindowVisible($target)
+if (-not $visible) { throw "Wallpaper window remained hidden after native ShowWindow" }
+
+[ordered]@{
+  ok = $true
+  mode = $mode
+  target = $target.ToInt64().ToString()
+  host = $wallpaperHost.ToInt64().ToString()
+  parent = ([MineradioNativeWin]::GetParent($target)).ToInt64().ToString()
+  shell = $script:shellView.ToInt64().ToString()
+  icon = $iconView.ToInt64().ToString()
+  worker = $raisedWallpaperWorker.ToInt64().ToString()
+  width = $width
+  height = $height
+  visible = $visible
+  raised = $raisedDesktop
+} | ConvertTo-Json -Compress
 `;
   execFile('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', script], {
     windowsHide: true,
-    timeout: 5000,
-  }, (error) => {
-    if (error) console.warn('Wallpaper WorkerW attach failed:', error.message);
+    timeout: 7000,
+  }, (error, stdout, stderr) => {
+    let diagnostic = null;
+    const output = String(stdout || '').trim().split(/\r?\n/).filter(Boolean);
+    if (output.length) {
+      try { diagnostic = JSON.parse(output[output.length - 1]); } catch (e) {}
+    }
+    if (!diagnostic) diagnostic = {};
+    if (error) {
+      diagnostic.error = String((stderr || error.message || 'WORKERW_ATTACH_FAILED')).trim();
+      console.warn('Wallpaper WorkerW attach failed:', diagnostic.error);
+    }
+    diagnostic.ok = !error && diagnostic.ok === true;
+    diagnostic.attempt = Number(attemptNumber) || 0;
+    writeWallpaperAttachDiagnostic(diagnostic);
+    if (typeof done === 'function') done(!error && diagnostic.ok === true, diagnostic);
   });
+}
+
+function clearWallpaperRecoveryTimers() {
+  if (wallpaperRecoveryTimer) clearTimeout(wallpaperRecoveryTimer);
+  if (wallpaperHealthTimer) clearTimeout(wallpaperHealthTimer);
+  wallpaperRecoveryTimer = null;
+  wallpaperHealthTimer = null;
+}
+
+function scheduleWallpaperRecovery(label, delay = 6500) {
+  if (wallpaperRecoveryTimer) clearTimeout(wallpaperRecoveryTimer);
+  wallpaperRecoveryTimer = setTimeout(() => {
+    wallpaperRecoveryTimer = null;
+    if (!wallpaperState.enabled || !wallpaperWindow || wallpaperWindow.isDestroyed()) return;
+    attachAndShowWallpaperWindow(wallpaperWindow, sendWallpaperState, label || 'Wallpaper recovery', { force: true })
+      .then((result) => {
+        if (!result || !result.ok) scheduleWallpaperRecovery(label, 9000);
+      });
+  }, Math.max(800, delay));
+}
+
+function scheduleWallpaperHealthCheck() {
+  if (wallpaperHealthTimer) clearTimeout(wallpaperHealthTimer);
+  wallpaperHealthTimer = setTimeout(() => {
+    wallpaperHealthTimer = null;
+    if (!wallpaperState.enabled || !wallpaperWindow || wallpaperWindow.isDestroyed()) return;
+    // Explorer recreates its WorkerW hierarchy after theme, virtual-desktop and
+    // shell changes. Reassert the parent/z-order at a low cadence so the live
+    // surface recovers without asking the user to toggle the feature off/on.
+    attachAndShowWallpaperWindow(wallpaperWindow, sendWallpaperState, 'Wallpaper health check', { force: true })
+      .then((result) => {
+        if (!result || !result.ok) scheduleWallpaperRecovery('Wallpaper health recovery', 2500);
+      });
+  }, 30000);
+}
+
+function attachAndShowWallpaperWindow(win, onShown, label, options = {}) {
+  if (!win || win.isDestroyed()) return Promise.resolve({ ok: false, error: 'NO_WALLPAPER_WINDOW' });
+  if (wallpaperAttachPromise) return wallpaperAttachPromise;
+  if (!options.force && wallpaperWorkerWAttached && win.isVisible()) {
+    return Promise.resolve({ ok: true, ...(wallpaperLastAttachDiagnostic || {}) });
+  }
+
+  const token = ++wallpaperAttachToken;
+  const wasAttached = wallpaperWorkerWAttached;
+  wallpaperWorkerWAttached = false;
+  let attempt = 0;
+  if (!wasAttached && win.isVisible()) win.hide();
+  if (typeof win.setFocusable === 'function') win.setFocusable(false);
+  win.setSkipTaskbar(true);
+  win.setIgnoreMouseEvents(true, { forward: true });
+  // BrowserWindow bounds are screen-relative only while it is top-level. The
+  // native attach step sizes the child to its actual desktop host afterwards.
+  if (!wasAttached) positionWallpaperWindow();
+
+  wallpaperAttachPromise = new Promise((resolve) => {
+    const finish = (result) => {
+      if (wallpaperAttachPromise) wallpaperAttachPromise = null;
+      resolve(result);
+    };
+    const tryAttach = () => {
+      if (!win || win.isDestroyed() || token !== wallpaperAttachToken || wallpaperWindow !== win) {
+        finish({ ok: false, cancelled: true, error: 'WALLPAPER_ATTACH_CANCELLED' });
+        return;
+      }
+      attempt += 1;
+      attachWallpaperToWorkerW(win, attempt, (attached, diagnostic) => {
+        if (!win || win.isDestroyed() || token !== wallpaperAttachToken || wallpaperWindow !== win) {
+          finish({ ok: false, cancelled: true, error: 'WALLPAPER_ATTACH_CANCELLED' });
+          return;
+        }
+        wallpaperLastAttachDiagnostic = { ...(diagnostic || {}), attempt };
+        if (attached) {
+          wallpaperWorkerWAttached = true;
+          if (typeof win.setFocusable === 'function') win.setFocusable(false);
+          win.setSkipTaskbar(true);
+          win.setIgnoreMouseEvents(true, { forward: true });
+          try { win.webContents.invalidate(); } catch (e) {}
+          console.info(`${label || 'Wallpaper'} attached:`, wallpaperLastAttachDiagnostic);
+          if (typeof onShown === 'function') onShown();
+          captureWallpaperRendererDiagnostic(win);
+          scheduleWallpaperHealthCheck();
+          finish({ ok: true, ...wallpaperLastAttachDiagnostic });
+          return;
+        }
+        if (attempt < 4) {
+          setTimeout(tryAttach, Math.min(1000, attempt * 240));
+          return;
+        }
+        wallpaperWorkerWAttached = false;
+        const error = wallpaperLastAttachDiagnostic.error || 'WORKERW_ATTACH_FAILED';
+        console.warn(`${label || 'Wallpaper'} WorkerW attach failed after ${attempt} attempts; retry remains armed.`);
+        scheduleWallpaperRecovery(label, 6500);
+        finish({ ok: false, pending: true, error, ...wallpaperLastAttachDiagnostic });
+      });
+    };
+    tryAttach();
+  });
+  return wallpaperAttachPromise;
 }
 
 function positionWallpaperWindow() {
   if (!wallpaperWindow || wallpaperWindow.isDestroyed()) return;
   const bounds = screen.getPrimaryDisplay().bounds;
-  wallpaperWindow.setBounds(bounds, false);
+  const current = wallpaperWindow.getBounds();
+  if (current.x !== bounds.x || current.y !== bounds.y || current.width !== bounds.width || current.height !== bounds.height) {
+    wallpaperWindow.setBounds(bounds, false);
+  }
 }
 
-function sendWallpaperState() {
+function sendWallpaperState(payload = wallpaperState) {
   if (!wallpaperWindow || wallpaperWindow.isDestroyed()) return;
-  wallpaperWindow.webContents.send('mineradio-wallpaper-state', wallpaperState);
+  wallpaperWindow.webContents.send('mineradio-wallpaper-state', payload);
+}
+
+function mergeWallpaperState(payload = {}) {
+  const next = { ...wallpaperState, ...payload };
+  if (payload && payload.colors) next.colors = { ...(wallpaperState.colors || {}), ...payload.colors };
+  if (payload && payload.motion) next.motion = { ...(wallpaperState.motion || {}), ...payload.motion };
+  if (payload && payload.visual) next.visual = { ...(wallpaperState.visual || {}), ...payload.visual };
+  if (payload && payload.lyrics) next.lyrics = { ...(wallpaperState.lyrics || {}), ...payload.lyrics };
+  wallpaperState = next;
+  return next;
+}
+
+function stampWallpaperState(payload = {}) {
+  const incoming = Number(payload && (payload.seq != null ? payload.seq : payload.sequence));
+  const validIncoming = Number.isSafeInteger(incoming) && incoming >= 0 ? incoming : 0;
+  // The App renderer's local counter restarts after a reload, while the
+  // dedicated wallpaper renderer can stay alive. Keep the sequence monotonic
+  // in the main process so a surviving surface never rejects the new session's
+  // frames as stale for several minutes.
+  wallpaperSequence = Math.max(wallpaperSequence + 1, validIncoming);
+  return { ...(payload || {}), seq: wallpaperSequence };
+}
+
+function serializeWallpaperEngineBridgePayload(payload) {
+  try {
+    const serialized = JSON.stringify(payload && typeof payload === 'object' ? payload : {});
+    return serialized == null ? '{}' : serialized;
+  } catch (e) {
+    console.warn('Wallpaper Engine bridge could not serialize state:', e.message);
+    return '{}';
+  }
+}
+
+function writeWallpaperEngineBridgeJson(res, statusCode, payload) {
+  const body = serializeWallpaperEngineBridgePayload(payload);
+  res.writeHead(statusCode, {
+    'Access-Control-Allow-Origin': '*',
+    'Access-Control-Allow-Methods': 'GET, OPTIONS',
+    'Access-Control-Allow-Headers': 'Cache-Control, Content-Type, Last-Event-ID',
+    'Cache-Control': 'no-store, no-cache, must-revalidate, proxy-revalidate',
+    'Content-Type': 'application/json; charset=utf-8',
+    'Content-Length': Buffer.byteLength(body),
+  });
+  res.end(body);
+}
+
+function writeWallpaperEngineBridgeEvent(res, payload) {
+  if (!res || res.destroyed || res.writableEnded) return false;
+  try {
+    return res.write(`data: ${serializeWallpaperEngineBridgePayload(payload)}\n\n`);
+  } catch (e) {
+    return false;
+  }
+}
+
+function broadcastWallpaperEngineState(payload) {
+  for (const client of Array.from(wallpaperEngineBridgeClients)) {
+    if (!client || client.destroyed || client.writableEnded) {
+      wallpaperEngineBridgeClients.delete(client);
+      continue;
+    }
+    if (!writeWallpaperEngineBridgeEvent(client, payload)) {
+      // A false return can also mean ordinary backpressure, so keep the client
+      // unless Node has actually closed the response.
+      if (client.destroyed || client.writableEnded) wallpaperEngineBridgeClients.delete(client);
+    }
+  }
+}
+
+function handleWallpaperEngineBridgeRequest(req, res) {
+  const method = String(req.method || 'GET').toUpperCase();
+  if (method === 'OPTIONS') {
+    res.writeHead(204, {
+      'Access-Control-Allow-Origin': '*',
+      'Access-Control-Allow-Methods': 'GET, OPTIONS',
+      'Access-Control-Allow-Headers': 'Cache-Control, Content-Type, Last-Event-ID',
+      'Access-Control-Max-Age': '86400',
+      'Cache-Control': 'no-store',
+    });
+    res.end();
+    return;
+  }
+  if (method !== 'GET') {
+    writeWallpaperEngineBridgeJson(res, 405, { ok: false, error: 'METHOD_NOT_ALLOWED' });
+    return;
+  }
+
+  let pathname = '/';
+  try {
+    pathname = new URL(req.url || '/', `http://${WALLPAPER_ENGINE_BRIDGE_HOST}:${WALLPAPER_ENGINE_BRIDGE_PORT}`).pathname;
+  } catch (e) {}
+
+  if (pathname === '/health') {
+    writeWallpaperEngineBridgeJson(res, 200, {
+      ok: true,
+      app: APP_NAME,
+      mode: WALLPAPER_ENGINE_BRIDGE_MODE,
+      enabled: wallpaperState.enabled === true,
+      seq: Number(wallpaperState.seq) || 0,
+      clients: wallpaperEngineBridgeClients.size,
+    });
+    return;
+  }
+  if (pathname === '/state') {
+    writeWallpaperEngineBridgeJson(res, 200, wallpaperState);
+    return;
+  }
+  if (pathname === '/events') {
+    res.writeHead(200, {
+      'Access-Control-Allow-Origin': '*',
+      'Access-Control-Allow-Methods': 'GET, OPTIONS',
+      'Access-Control-Allow-Headers': 'Cache-Control, Content-Type, Last-Event-ID',
+      'Cache-Control': 'no-store, no-cache, must-revalidate, proxy-revalidate',
+      'Content-Type': 'text/event-stream; charset=utf-8',
+      'Connection': 'keep-alive',
+      'X-Accel-Buffering': 'no',
+    });
+    res.write('retry: 1500\n\n');
+    wallpaperEngineBridgeClients.add(res);
+    writeWallpaperEngineBridgeEvent(res, wallpaperState);
+    const forgetClient = () => wallpaperEngineBridgeClients.delete(res);
+    req.on('close', forgetClient);
+    res.on('close', forgetClient);
+    res.on('error', forgetClient);
+    return;
+  }
+  writeWallpaperEngineBridgeJson(res, 404, { ok: false, error: 'NOT_FOUND' });
+}
+
+function startWallpaperEngineBridge() {
+  if (wallpaperEngineBridgeServer && wallpaperEngineBridgeServer.listening) {
+    return Promise.resolve({
+      host: WALLPAPER_ENGINE_BRIDGE_HOST,
+      port: WALLPAPER_ENGINE_BRIDGE_PORT,
+      mode: WALLPAPER_ENGINE_BRIDGE_MODE,
+    });
+  }
+  if (wallpaperEngineBridgeStartPromise) return wallpaperEngineBridgeStartPromise;
+
+  const server = http.createServer(handleWallpaperEngineBridgeRequest);
+  wallpaperEngineBridgeServer = server;
+  wallpaperEngineBridgeStartPromise = new Promise((resolve, reject) => {
+    const onStartupError = (error) => {
+      if (wallpaperEngineBridgeServer === server) wallpaperEngineBridgeServer = null;
+      reject(error);
+    };
+    server.once('error', onStartupError);
+    server.listen(WALLPAPER_ENGINE_BRIDGE_PORT, WALLPAPER_ENGINE_BRIDGE_HOST, () => {
+      server.removeListener('error', onStartupError);
+      server.on('error', (error) => console.warn('Wallpaper Engine bridge error:', error.message));
+      if (wallpaperEngineBridgeKeepAliveTimer) clearInterval(wallpaperEngineBridgeKeepAliveTimer);
+      wallpaperEngineBridgeKeepAliveTimer = setInterval(() => {
+        for (const client of Array.from(wallpaperEngineBridgeClients)) {
+          if (!client || client.destroyed || client.writableEnded) {
+            wallpaperEngineBridgeClients.delete(client);
+            continue;
+          }
+          try { client.write(`: keepalive ${Date.now()}\n\n`); } catch (e) { wallpaperEngineBridgeClients.delete(client); }
+        }
+      }, 15000);
+      console.info(`Wallpaper Engine bridge listening on http://${WALLPAPER_ENGINE_BRIDGE_HOST}:${WALLPAPER_ENGINE_BRIDGE_PORT}`);
+      resolve({
+        host: WALLPAPER_ENGINE_BRIDGE_HOST,
+        port: WALLPAPER_ENGINE_BRIDGE_PORT,
+        mode: WALLPAPER_ENGINE_BRIDGE_MODE,
+      });
+    });
+  }).finally(() => {
+    wallpaperEngineBridgeStartPromise = null;
+  });
+  return wallpaperEngineBridgeStartPromise;
+}
+
+function closeWallpaperEngineBridge() {
+  if (wallpaperEngineBridgeKeepAliveTimer) clearInterval(wallpaperEngineBridgeKeepAliveTimer);
+  wallpaperEngineBridgeKeepAliveTimer = null;
+  for (const client of Array.from(wallpaperEngineBridgeClients)) {
+    wallpaperEngineBridgeClients.delete(client);
+    try { client.end(); } catch (e) {}
+  }
+  const server = wallpaperEngineBridgeServer;
+  wallpaperEngineBridgeServer = null;
+  if (server) {
+    try { server.close(); } catch (e) {}
+  }
+}
+
+function firstExistingFile(candidates) {
+  const seen = new Set();
+  for (const candidate of candidates || []) {
+    if (!candidate) continue;
+    const key = process.platform === 'win32' ? String(candidate).toLowerCase() : String(candidate);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    try {
+      if (fs.statSync(candidate).isFile()) return candidate;
+    } catch (e) {}
+  }
+  return '';
+}
+
+function wallpaperEngineInstallRoots() {
+  const roots = [];
+  const addSteamRoot = (steamRoot) => {
+    if (!steamRoot) return;
+    roots.push(path.join(steamRoot, 'steamapps', 'common', 'wallpaper_engine'));
+  };
+  addSteamRoot(process.env.STEAM_PATH);
+  addSteamRoot(process.env['ProgramFiles(x86)'] && path.join(process.env['ProgramFiles(x86)'], 'Steam'));
+  addSteamRoot(process.env.ProgramFiles && path.join(process.env.ProgramFiles, 'Steam'));
+  addSteamRoot('C:\\Program Files (x86)\\Steam');
+  addSteamRoot('C:\\Program Files\\Steam');
+  addSteamRoot('C:\\Steam');
+  addSteamRoot('C:\\SteamLibrary');
+  addSteamRoot('D:\\SteamLibrary');
+  addSteamRoot('D:\\Steam');
+  addSteamRoot('E:\\SteamLibrary');
+  addSteamRoot('E:\\Steam');
+  return roots;
+}
+
+function locateWallpaperEngineExecutable(installRoots) {
+  const roots = installRoots || wallpaperEngineInstallRoots();
+  const candidates = [];
+  if (process.env.MINERADIO_WALLPAPER_ENGINE_EXE) candidates.push(process.env.MINERADIO_WALLPAPER_ENGINE_EXE);
+  // Prefer the standard 32-bit host: it is Wallpaper Engine's active renderer
+  // on this install and its control command reuses the existing process.
+  for (const executable of ['wallpaper32.exe', 'wallpaper64.exe']) {
+    for (const root of roots) candidates.push(path.join(root, executable));
+  }
+  return firstExistingFile(candidates);
+}
+
+function locateMineradioWallpaperEngineProject(installRoots) {
+  const roots = installRoots || wallpaperEngineInstallRoots();
+  const candidates = [];
+  if (process.env.MINERADIO_WALLPAPER_ENGINE_PROJECT) candidates.push(process.env.MINERADIO_WALLPAPER_ENGINE_PROJECT);
+  for (const root of roots) {
+    candidates.push(path.join(root, 'projects', 'myprojects', 'MineradioLive', 'project.json'));
+    candidates.push(path.join(root, 'projects', 'myprojects', 'Mineradio Live', 'project.json'));
+  }
+
+  // Development checkout, unpacked app, and packaged-extraResources layouts.
+  candidates.push(path.resolve(__dirname, '..', 'wallpaper-engine', 'MineradioLive', 'project.json'));
+  candidates.push(path.resolve(__dirname, '..', '..', 'wallpaper-engine', 'MineradioLive', 'project.json'));
+  candidates.push(path.resolve(__dirname, '..', '..', '..', 'wallpaper-engine', 'MineradioLive', 'project.json'));
+  candidates.push(path.resolve(__dirname, '..', 'wallpaper-engine', 'project.json'));
+  candidates.push(path.resolve(__dirname, '..', '..', '..', 'wallpaper-engine', 'project.json'));
+  if (process.resourcesPath) {
+    candidates.push(path.join(process.resourcesPath, 'wallpaper-engine', 'MineradioLive', 'project.json'));
+    candidates.push(path.join(process.resourcesPath, 'app', 'wallpaper-engine', 'MineradioLive', 'project.json'));
+  }
+  return firstExistingFile(candidates);
+}
+
+function applyWallpaperEngineHost() {
+  if (process.platform !== 'win32') {
+    return Promise.resolve({ hostApplied: false, hostError: 'WALLPAPER_ENGINE_WINDOWS_ONLY' });
+  }
+  if (wallpaperEngineHostLaunchPromise) return wallpaperEngineHostLaunchPromise;
+  const now = Date.now();
+  if (wallpaperEngineHostLastResult && now - wallpaperEngineHostLastAttemptAt < WALLPAPER_ENGINE_HOST_RETRY_MS) {
+    return Promise.resolve({ ...wallpaperEngineHostLastResult, deduped: true });
+  }
+  wallpaperEngineHostLastAttemptAt = now;
+
+  wallpaperEngineHostLaunchPromise = (async () => {
+    const installRoots = wallpaperEngineInstallRoots();
+    const executable = locateWallpaperEngineExecutable(installRoots);
+    if (!executable) return { hostApplied: false, hostError: 'WALLPAPER_ENGINE_EXECUTABLE_NOT_FOUND' };
+    const projectFile = locateMineradioWallpaperEngineProject(installRoots);
+    if (!projectFile) return { hostApplied: false, hostError: 'MINERADIO_LIVE_PROJECT_NOT_FOUND' };
+
+    return new Promise((resolve) => {
+      let child = null;
+      let settled = false;
+      const finish = (result) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timeout);
+        resolve(result);
+      };
+      const timeout = setTimeout(() => {
+        finish({ hostApplied: false, hostError: 'WALLPAPER_ENGINE_LAUNCH_TIMEOUT' });
+      }, 4000);
+      try {
+        child = spawn(executable, [
+          '-control', 'openWallpaper',
+          '-file', projectFile,
+          '-monitor', '0',
+        ], {
+          windowsHide: true,
+          detached: true,
+          stdio: 'ignore',
+        });
+        child.once('error', (error) => {
+          finish({ hostApplied: false, hostError: error.message || 'WALLPAPER_ENGINE_LAUNCH_FAILED' });
+        });
+        child.once('spawn', () => {
+          console.info('Wallpaper Engine MineradioLive project activation requested.');
+          finish({ hostApplied: true, hostError: '' });
+        });
+        child.unref();
+      } catch (e) {
+        finish({ hostApplied: false, hostError: e.message || 'WALLPAPER_ENGINE_LAUNCH_FAILED' });
+      }
+    });
+  })().then((result) => {
+    wallpaperEngineHostLastResult = result;
+    return result;
+  }).catch((error) => {
+    const result = { hostApplied: false, hostError: error.message || 'WALLPAPER_ENGINE_LAUNCH_FAILED' };
+    wallpaperEngineHostLastResult = result;
+    return result;
+  }).finally(() => {
+    wallpaperEngineHostLaunchPromise = null;
+  });
+  return wallpaperEngineHostLaunchPromise;
 }
 
 function createWallpaperWindow(payload = {}) {
-  wallpaperState = { ...wallpaperState, ...payload, enabled: true };
+  mergeWallpaperState({ ...payload, enabled: true });
   if (wallpaperWindow && !wallpaperWindow.isDestroyed()) {
-    positionWallpaperWindow();
     sendWallpaperState();
+    if (!wallpaperWorkerWAttached || !wallpaperWindow.isVisible()) {
+      attachAndShowWallpaperWindow(wallpaperWindow, sendWallpaperState, 'Wallpaper surface');
+    }
     return wallpaperWindow;
   }
+  clearWallpaperRecoveryTimers();
+  wallpaperAttachPromise = null;
+  wallpaperWorkerWAttached = false;
+  wallpaperLastAttachDiagnostic = null;
   const bounds = screen.getPrimaryDisplay().bounds;
-  wallpaperWindow = new BrowserWindow({
+  const win = new BrowserWindow({
     ...bounds,
     frame: false,
-    transparent: false,
-    backgroundColor: '#050608',
+    transparent: true,
+    backgroundColor: '#00000000',
     hasShadow: false,
     resizable: false,
     movable: false,
@@ -1060,36 +1773,80 @@ function createWallpaperWindow(payload = {}) {
     show: false,
     title: 'Mineradio Wallpaper',
     webPreferences: {
-      preload: path.join(__dirname, 'overlay-preload.js'),
+      preload: path.join(__dirname, 'wallpaper-preload.js'),
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: false,
       backgroundThrottling: false,
+      paintWhenInitiallyHidden: true,
     },
   });
-  wallpaperWindow.setIgnoreMouseEvents(true, { forward: true });
-  wallpaperWindow.once('ready-to-show', () => {
-    if (!wallpaperWindow || wallpaperWindow.isDestroyed()) return;
-    positionWallpaperWindow();
-    wallpaperWindow.showInactive();
-    attachWallpaperToWorkerW(wallpaperWindow);
+  wallpaperWindow = win;
+  win.setIgnoreMouseEvents(true, { forward: true });
+  if (typeof win.setFocusable === 'function') win.setFocusable(false);
+  win.setSkipTaskbar(true);
+  win.webContents.setAudioMuted(true);
+  win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
+  const activateSurface = (label) => {
+    if (!wallpaperWindow || wallpaperWindow !== win || win.isDestroyed()) return;
+    attachAndShowWallpaperWindow(win, () => {
+      if (!wallpaperWindow || wallpaperWindow !== win || win.isDestroyed()) return;
+      sendWallpaperState();
+    }, label || 'Wallpaper surface');
+  };
+  // Some initially-hidden BrowserWindows do not emit
+  // ready-to-show consistently. did-finish-load and an immediate native attach
+  // are both valid fallbacks; attachAndShow deduplicates concurrent attempts.
+  win.once('ready-to-show', () => activateSurface('Wallpaper ready surface'));
+  win.webContents.once('did-finish-load', () => {
+    if (wallpaperWindow !== win) return;
     sendWallpaperState();
+    activateSurface('Wallpaper loaded surface');
   });
-  wallpaperWindow.webContents.once('did-finish-load', sendWallpaperState);
-  wallpaperWindow.on('closed', () => {
+  win.webContents.on('did-fail-load', (_event, code, description, url, isMainFrame) => {
+    if (isMainFrame === false || wallpaperWindow !== win) return;
+    console.warn('Wallpaper renderer failed to load:', code, description, url);
+    scheduleWallpaperRecovery('Wallpaper load recovery', 2500);
+  });
+  win.webContents.on('render-process-gone', (_event, details) => {
+    if (wallpaperWindow !== win || !wallpaperState.enabled) return;
+    console.warn('Wallpaper renderer exited:', details && details.reason);
+    setTimeout(() => {
+      if (wallpaperWindow === win && !win.isDestroyed() && wallpaperState.enabled) win.webContents.reload();
+    }, 900);
+  });
+  win.on('closed', () => {
+    if (wallpaperWindow !== win) return;
+    const shouldRecover = wallpaperState.enabled === true && !!mainWindow && !mainWindow.isDestroyed();
     wallpaperWindow = null;
+    wallpaperWorkerWAttached = false;
+    wallpaperAttachPromise = null;
+    wallpaperAttachToken += 1;
+    clearWallpaperRecoveryTimers();
+    if (shouldRecover) {
+      setTimeout(() => {
+        if (wallpaperState.enabled && (!wallpaperWindow || wallpaperWindow.isDestroyed())) createWallpaperWindow(wallpaperState);
+      }, 1200);
+    }
   });
-  wallpaperWindow.loadURL(overlayUrl('wallpaper.html')).catch((e) => console.warn('Wallpaper load failed:', e.message));
-  return wallpaperWindow;
+  win.loadURL(overlayUrl('index.html?surface=wallpaper')).catch((e) => console.warn('Wallpaper load failed:', e.message));
+  activateSurface('Wallpaper initial surface');
+  return win;
 }
 
 function closeWallpaperWindow() {
   wallpaperState = { ...wallpaperState, enabled: false };
-  if (wallpaperWindow && !wallpaperWindow.isDestroyed()) {
+  clearWallpaperRecoveryTimers();
+  const win = wallpaperWindow;
+  if (win && !win.isDestroyed()) {
     sendWallpaperState();
-    wallpaperWindow.close();
+    win.close();
   }
   wallpaperWindow = null;
+  wallpaperWorkerWAttached = false;
+  wallpaperAttachPromise = null;
+  wallpaperLastAttachDiagnostic = null;
+  wallpaperAttachToken += 1;
 }
 
 function closeOverlayWindows() {
@@ -1289,32 +2046,64 @@ ipcMain.handle('mineradio-desktop-lyrics-move-by', async (_event, dx, dy) => {
   }
 });
 
-ipcMain.handle('mineradio-wallpaper-set-enabled', async (_event, enabled, payload) => {
+ipcMain.handle('mineradio-wallpaper-set-enabled', async (event, enabled, payload) => {
   try {
-    if (enabled) createWallpaperWindow(payload || {});
-    else closeWallpaperWindow();
-    return { ok: true };
+    if (!mainWindow || mainWindow.isDestroyed() || getSenderWindow(event) !== mainWindow) {
+      return { ok: false, error: 'UNAUTHORIZED_WALLPAPER_SENDER' };
+    }
+    mergeWallpaperState(stampWallpaperState({ ...(payload || {}), enabled: !!enabled }));
+    if (enabled) {
+      const bridge = await startWallpaperEngineBridge();
+      // This command also starts Wallpaper Engine when its Steam autostart is
+      // disabled, then asks it to apply our local web-wallpaper project.
+      const host = await applyWallpaperEngineHost();
+      broadcastWallpaperEngineState(wallpaperState);
+      return {
+        ok: true,
+        pending: false,
+        enabled: true,
+        // Wallpaper Engine owns the desktop surface. "attached" is reserved for
+        // the retired native WorkerW BrowserWindow path and must stay false.
+        attached: false,
+        mode: WALLPAPER_ENGINE_BRIDGE_MODE,
+        host: bridge.host,
+        port: bridge.port,
+        hostApplied: host.hostApplied === true,
+        hostError: host.hostError || '',
+        error: '',
+      };
+    }
+    closeWallpaperWindow();
+    broadcastWallpaperEngineState(wallpaperState);
+    return { ok: true, enabled: false, attached: false, mode: WALLPAPER_ENGINE_BRIDGE_MODE };
   } catch (e) {
     return { ok: false, error: e.message || 'WALLPAPER_FAILED' };
   }
 });
 
-ipcMain.handle('mineradio-wallpaper-update', async (_event, payload) => {
-  try {
-    wallpaperState = { ...wallpaperState, ...(payload || {}) };
-    if (wallpaperState.enabled) {
-      createWallpaperWindow(wallpaperState);
-      if (wallpaperWindow && !wallpaperWindow.isDestroyed()) {
-        positionWallpaperWindow();
-        sendWallpaperState();
-      }
-    } else if (wallpaperWindow && !wallpaperWindow.isDestroyed()) {
-      sendWallpaperState();
-    }
-    return { ok: true };
-  } catch (e) {
-    return { ok: false, error: e.message || 'WALLPAPER_UPDATE_FAILED' };
+ipcMain.on('mineradio-wallpaper-state-push', (event, payload) => {
+  if (!mainWindow || mainWindow.isDestroyed() || getSenderWindow(event) !== mainWindow) return;
+  const raw = payload && typeof payload === 'object' && !Array.isArray(payload) ? payload : {};
+  const next = stampWallpaperState(raw);
+  mergeWallpaperState(next);
+  // Forward the incremental 30 Hz frame as-is. wallpaperState remains the
+  // complete cached snapshot used for a newly loaded/recovered surface. Sending
+  // that cache here would clone the full lyric list, beat map and background on
+  // every frame and can stall both Electron renderers.
+  sendWallpaperState(next);
+  broadcastWallpaperEngineState(next);
+});
+
+ipcMain.handle('mineradio-wallpaper-ready', (event) => {
+  if (!wallpaperWindow || wallpaperWindow.isDestroyed() || getSenderWindow(event) !== wallpaperWindow) {
+    return { ok: false, error: 'UNAUTHORIZED_WALLPAPER_SENDER' };
   }
+  sendWallpaperState();
+  return {
+    ok: true,
+    attached: !!wallpaperWorkerWAttached,
+    mode: wallpaperLastAttachDiagnostic && wallpaperLastAttachDiagnostic.mode || '',
+  };
 });
 
 async function createWindow() {
@@ -1439,13 +2228,30 @@ if (!gotSingleInstanceLock) {
   });
 
   app.whenReady().then(async () => {
+    // Wallpaper Engine can start before Mineradio. Keep the loopback endpoint
+    // available for it from the beginning, even while wallpaper mode is off.
+    await startWallpaperEngineBridge().catch((e) => {
+      console.warn('Wallpaper Engine bridge startup failed:', e.message);
+    });
     screen.on('display-metrics-changed', () => {
       positionDesktopLyricsWindow();
-      positionWallpaperWindow();
+      if (wallpaperWindow && !wallpaperWindow.isDestroyed()) {
+        attachAndShowWallpaperWindow(wallpaperWindow, sendWallpaperState, 'Wallpaper display refresh', { force: true });
+      }
       scheduleWindowStateSend(mainWindow);
     });
-    screen.on('display-added', () => scheduleWindowStateSend(mainWindow));
-    screen.on('display-removed', () => scheduleWindowStateSend(mainWindow));
+    screen.on('display-added', () => {
+      if (wallpaperWindow && !wallpaperWindow.isDestroyed()) {
+        attachAndShowWallpaperWindow(wallpaperWindow, sendWallpaperState, 'Wallpaper display added', { force: true });
+      }
+      scheduleWindowStateSend(mainWindow);
+    });
+    screen.on('display-removed', () => {
+      if (wallpaperWindow && !wallpaperWindow.isDestroyed()) {
+        attachAndShowWallpaperWindow(wallpaperWindow, sendWallpaperState, 'Wallpaper display removed', { force: true });
+      }
+      scheduleWindowStateSend(mainWindow);
+    });
     await createWindow();
   });
 
@@ -1461,6 +2267,7 @@ if (!gotSingleInstanceLock) {
   app.on('before-quit', () => {
     unregisterMineradioGlobalHotkeys();
     closeOverlayWindows();
+    closeWallpaperEngineBridge();
     if (localServer && localServer.close) localServer.close();
   });
 }

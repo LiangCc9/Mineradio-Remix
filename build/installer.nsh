@@ -37,7 +37,7 @@
 !include nsDialogs.nsh
 !include WinMessages.nsh
 
-!define MINERADIO_INSTALL_MARKER ".mineradio-install-root"
+!define MINERADIO_INSTALL_MARKER ".mineradio-remix-install-root"
 
 !ifndef BUILD_UNINSTALLER
   Var MineradioWelcomePage
@@ -62,8 +62,8 @@
 !macro customInstall
   FileOpen $0 "$INSTDIR\${MINERADIO_INSTALL_MARKER}" w
   ${IfNot} ${Errors}
-    FileWrite $0 "Mineradio install root$\r$\n"
-    FileWrite $0 "appId=com.mineradio.desktop$\r$\n"
+    FileWrite $0 "Mineradio Remix install root$\r$\n"
+    FileWrite $0 "appId=com.liangcc9.mineradio.remix$\r$\n"
     FileClose $0
   ${EndIf}
 !macroend
@@ -260,77 +260,77 @@ Function MineradioUseFirstAvailableInstallDir
   IfFileExists "X:\*.*" driveX 0
   IfFileExists "Y:\*.*" driveY 0
   IfFileExists "Z:\*.*" driveZ 0
-  StrCpy $INSTDIR "C:\Mineradio"
+  StrCpy $INSTDIR "C:\MineradioRemix"
   Return
 
   driveD:
-    StrCpy $INSTDIR "D:\Mineradio"
+    StrCpy $INSTDIR "D:\MineradioRemix"
     Return
   driveE:
-    StrCpy $INSTDIR "E:\Mineradio"
+    StrCpy $INSTDIR "E:\MineradioRemix"
     Return
   driveF:
-    StrCpy $INSTDIR "F:\Mineradio"
+    StrCpy $INSTDIR "F:\MineradioRemix"
     Return
   driveG:
-    StrCpy $INSTDIR "G:\Mineradio"
+    StrCpy $INSTDIR "G:\MineradioRemix"
     Return
   driveH:
-    StrCpy $INSTDIR "H:\Mineradio"
+    StrCpy $INSTDIR "H:\MineradioRemix"
     Return
   driveI:
-    StrCpy $INSTDIR "I:\Mineradio"
+    StrCpy $INSTDIR "I:\MineradioRemix"
     Return
   driveJ:
-    StrCpy $INSTDIR "J:\Mineradio"
+    StrCpy $INSTDIR "J:\MineradioRemix"
     Return
   driveK:
-    StrCpy $INSTDIR "K:\Mineradio"
+    StrCpy $INSTDIR "K:\MineradioRemix"
     Return
   driveL:
-    StrCpy $INSTDIR "L:\Mineradio"
+    StrCpy $INSTDIR "L:\MineradioRemix"
     Return
   driveM:
-    StrCpy $INSTDIR "M:\Mineradio"
+    StrCpy $INSTDIR "M:\MineradioRemix"
     Return
   driveN:
-    StrCpy $INSTDIR "N:\Mineradio"
+    StrCpy $INSTDIR "N:\MineradioRemix"
     Return
   driveO:
-    StrCpy $INSTDIR "O:\Mineradio"
+    StrCpy $INSTDIR "O:\MineradioRemix"
     Return
   driveP:
-    StrCpy $INSTDIR "P:\Mineradio"
+    StrCpy $INSTDIR "P:\MineradioRemix"
     Return
   driveQ:
-    StrCpy $INSTDIR "Q:\Mineradio"
+    StrCpy $INSTDIR "Q:\MineradioRemix"
     Return
   driveR:
-    StrCpy $INSTDIR "R:\Mineradio"
+    StrCpy $INSTDIR "R:\MineradioRemix"
     Return
   driveS:
-    StrCpy $INSTDIR "S:\Mineradio"
+    StrCpy $INSTDIR "S:\MineradioRemix"
     Return
   driveT:
-    StrCpy $INSTDIR "T:\Mineradio"
+    StrCpy $INSTDIR "T:\MineradioRemix"
     Return
   driveU:
-    StrCpy $INSTDIR "U:\Mineradio"
+    StrCpy $INSTDIR "U:\MineradioRemix"
     Return
   driveV:
-    StrCpy $INSTDIR "V:\Mineradio"
+    StrCpy $INSTDIR "V:\MineradioRemix"
     Return
   driveW:
-    StrCpy $INSTDIR "W:\Mineradio"
+    StrCpy $INSTDIR "W:\MineradioRemix"
     Return
   driveX:
-    StrCpy $INSTDIR "X:\Mineradio"
+    StrCpy $INSTDIR "X:\MineradioRemix"
     Return
   driveY:
-    StrCpy $INSTDIR "Y:\Mineradio"
+    StrCpy $INSTDIR "Y:\MineradioRemix"
     Return
   driveZ:
-    StrCpy $INSTDIR "Z:\Mineradio"
+    StrCpy $INSTDIR "Z:\MineradioRemix"
     Return
 FunctionEnd
 
@@ -375,23 +375,23 @@ Function MineradioNormalizeInstallDir
   ${If} $1 == 2
     StrCpy $2 "$0" 1 1
     ${If} $2 == ":"
-      StrCpy $0 "$0\Mineradio"
+      StrCpy $0 "$0\MineradioRemix"
     ${EndIf}
   ${ElseIf} $1 == 3
     StrCpy $2 "$0" 1 1
     StrCpy $3 "$0" 1 2
     ${If} $2 == ":"
     ${AndIf} $3 == "\"
-      StrCpy $0 "$0Mineradio"
+      StrCpy $0 "$0MineradioRemix"
     ${EndIf}
   ${EndIf}
 
   StrLen $1 "$0"
-  StrCpy $2 "$0" 10 -10
-  ${If} $1 < 10
-  ${OrIf} $2 != "\Mineradio"
-  ${AndIf} $2 != "\mineradio"
-    StrCpy $0 "$0\Mineradio"
+  StrCpy $2 "$0" 15 -15
+  ${If} $1 < 15
+  ${OrIf} $2 != "\MineradioRemix"
+  ${AndIf} $2 != "\mineradioremix"
+    StrCpy $0 "$0\MineradioRemix"
   ${EndIf}
   Exch $0
 FunctionEnd
@@ -653,7 +653,7 @@ Function MineradioDisableUnsafeOldUninstallers
   Call MineradioOldInstallPathNeedsQuarantine
   Pop $1
   ${If} $1 == "1"
-    DetailPrint "Skip unsafe legacy Mineradio uninstaller: $0"
+    DetailPrint "Skip unsafe legacy Mineradio Remix uninstaller: $0"
     StrCpy $2 "1"
   ${EndIf}
 
@@ -664,7 +664,7 @@ Function MineradioDisableUnsafeOldUninstallers
   Call MineradioOldInstallPathNeedsQuarantine
   Pop $1
   ${If} $1 == "1"
-    DetailPrint "Skip unsafe legacy Mineradio uninstaller: $0"
+    DetailPrint "Skip unsafe legacy Mineradio Remix uninstaller: $0"
     StrCpy $2 "1"
   ${EndIf}
 
@@ -682,7 +682,7 @@ Function MineradioDisableUnsafeOldUninstallers
   Call MineradioOldInstallPathNeedsQuarantine
   Pop $1
   ${If} $1 == "1"
-    DetailPrint "Skip unsafe legacy Mineradio uninstaller: $0"
+    DetailPrint "Skip unsafe legacy Mineradio Remix uninstaller: $0"
     StrCpy $2 "1"
   ${EndIf}
 
@@ -693,7 +693,7 @@ Function MineradioDisableUnsafeOldUninstallers
   Call MineradioOldInstallPathNeedsQuarantine
   Pop $1
   ${If} $1 == "1"
-    DetailPrint "Skip unsafe legacy Mineradio uninstaller: $0"
+    DetailPrint "Skip unsafe legacy Mineradio Remix uninstaller: $0"
     StrCpy $2 "1"
   ${EndIf}
 
@@ -711,7 +711,7 @@ Function MineradioDeleteLegacyUninstallerFileIfMissingMarker
     Pop $1
     ${If} $1 != ""
       IfFileExists "$1\${MINERADIO_INSTALL_MARKER}" done 0
-      DetailPrint "Remove legacy Mineradio uninstaller file: $1"
+      DetailPrint "Remove legacy Mineradio Remix uninstaller file: $1"
       Delete "$1\Uninstall ${PRODUCT_FILENAME}.exe"
     ${EndIf}
   ${EndIf}
@@ -742,18 +742,18 @@ Function MineradioValidateInstallDir
       ${If} $2 == "1"
       ${AndIf} $3 != "1"
       ${AndIf} $4 != "1"
-        MessageBox MB_ICONSTOP|MB_OK "检测到这台电脑还有 D-Z 盘，Mineradio 不安装到 C 盘。请改选 D 盘或其它非 C 盘的 Mineradio 文件夹。$\r$\n$\r$\n如果电脑只有 C 盘，安装器会自动放行 C:\Mineradio。"
+        MessageBox MB_ICONSTOP|MB_OK "检测到这台电脑还有 D-Z 盘，Mineradio Remix 不安装到 C 盘。请改选 D 盘或其它非 C 盘的 Mineradio Remix 文件夹。$\r$\n$\r$\n如果电脑只有 C 盘，安装器会自动放行 C:\MineradioRemix。"
         Abort
       ${EndIf}
     ${EndIf}
   ${EndIf}
 
   StrLen $0 "$INSTDIR"
-  StrCpy $1 "$INSTDIR" 10 -10
-  ${If} $0 < 10
-  ${OrIf} $1 != "\Mineradio"
-  ${AndIf} $1 != "\mineradio"
-    MessageBox MB_ICONSTOP|MB_OK "安装目录必须是独立的 Mineradio 文件夹。请选择一个上级目录，安装器会自动创建 Mineradio 子文件夹。"
+  StrCpy $1 "$INSTDIR" 15 -15
+  ${If} $0 < 15
+  ${OrIf} $1 != "\MineradioRemix"
+  ${AndIf} $1 != "\mineradioremix"
+    MessageBox MB_ICONSTOP|MB_OK "安装目录必须是独立的 Mineradio Remix 文件夹。请选择一个上级目录，安装器会自动创建 Mineradio Remix 子文件夹。"
     Abort
   ${EndIf}
 
@@ -781,7 +781,7 @@ Function MineradioValidateInstallDir
     Goto valid
   ${EndIf}
 
-  MessageBox MB_ICONSTOP|MB_OK "为避免卸载时误删其它文件，Mineradio 不能安装到已有文件的非专属目录。请新建或选择一个空的 Mineradio 文件夹。$\r$\n$\r$\n当前路径：$INSTDIR"
+  MessageBox MB_ICONSTOP|MB_OK "为避免卸载时误删其它文件，Mineradio Remix 不能安装到已有文件的非专属目录。请新建或选择一个空的 Mineradio Remix 文件夹。$\r$\n$\r$\n当前路径：$INSTDIR"
   Abort
 
   valid:
@@ -801,12 +801,12 @@ Function MineradioWelcomeShow
   CreateFont $MineradioBodyFont "Microsoft YaHei UI" 9 400
   CreateFont $MineradioSmallFont "Microsoft YaHei UI" 8 400
 
-  ${NSD_CreateLabel} 22u 20u 82u 10u "MINERADIO"
+  ${NSD_CreateLabel} 22u 20u 82u 10u "MINERADIO REMIX"
   Pop $0
   SendMessage $0 ${WM_SETFONT} $MineradioSmallFont 1
   SetCtlColors $0 "3257F7" "FFFFFF"
 
-  ${NSD_CreateLabel} 22u 42u 226u 30u "Mineradio 安装"
+  ${NSD_CreateLabel} 22u 42u 226u 30u "Mineradio Remix 安装"
   Pop $0
   SendMessage $0 ${WM_SETFONT} $MineradioHeroFont 1
   SetCtlColors $0 "111217" "FFFFFF"
@@ -815,7 +815,7 @@ Function MineradioWelcomeShow
   Pop $0
   SetCtlColors $0 "" "3257F7"
 
-  ${NSD_CreateLabel} 22u 96u 238u 24u "为这台电脑安装 Mineradio。默认安装到 D:\Mineradio，下一步可以自由选择其它位置。"
+  ${NSD_CreateLabel} 22u 96u 238u 24u "为这台电脑安装 Mineradio Remix。默认安装到 D:\MineradioRemix，下一步可以自由选择其它位置。"
   Pop $0
   SendMessage $0 ${WM_SETFONT} $MineradioBodyFont 1
   SetCtlColors $0 "4B5263" "FFFFFF"
@@ -829,7 +829,7 @@ Function MineradioWelcomeShow
 FunctionEnd
 
 Function MineradioDirectoryBrowse
-  nsDialogs::SelectFolderDialog "选择 Mineradio 安装文件夹" "$INSTDIR"
+  nsDialogs::SelectFolderDialog "选择 Mineradio Remix 安装文件夹" "$INSTDIR"
   Pop $0
   ${If} $0 != error
   ${AndIf} $0 != ""
@@ -880,7 +880,7 @@ Function MineradioDirectoryShow
   SendMessage $0 ${WM_SETFONT} $MineradioSmallFont 1
   ${NSD_OnClick} $0 MineradioDirectoryBrowse
 
-  ${NSD_CreateLabel} 22u 122u 238u 12u "默认推荐：D:\Mineradio；选盘符会自动建文件夹。"
+  ${NSD_CreateLabel} 22u 122u 238u 12u "默认推荐：D:\MineradioRemix；选盘符会自动建文件夹。"
   Pop $0
   SendMessage $0 ${WM_SETFONT} $MineradioSmallFont 1
   SetCtlColors $0 "6B7280" "FFFFFF"
@@ -928,23 +928,23 @@ Function un.MineradioNormalizeInstallDir
   ${If} $1 == 2
     StrCpy $2 "$0" 1 1
     ${If} $2 == ":"
-      StrCpy $0 "$0\Mineradio"
+      StrCpy $0 "$0\MineradioRemix"
     ${EndIf}
   ${ElseIf} $1 == 3
     StrCpy $2 "$0" 1 1
     StrCpy $3 "$0" 1 2
     ${If} $2 == ":"
     ${AndIf} $3 == "\"
-      StrCpy $0 "$0Mineradio"
+      StrCpy $0 "$0MineradioRemix"
     ${EndIf}
   ${EndIf}
 
   StrLen $1 "$0"
-  StrCpy $2 "$0" 10 -10
-  ${If} $1 < 10
-  ${OrIf} $2 != "\Mineradio"
-  ${AndIf} $2 != "\mineradio"
-    StrCpy $0 "$0\Mineradio"
+  StrCpy $2 "$0" 15 -15
+  ${If} $1 < 15
+  ${OrIf} $2 != "\MineradioRemix"
+  ${AndIf} $2 != "\mineradioremix"
+    StrCpy $0 "$0\MineradioRemix"
   ${EndIf}
   Exch $0
 FunctionEnd
@@ -973,7 +973,7 @@ Function un.MineradioValidateUninstallDir
   Call un.MineradioNormalizeInstallDir
   Pop $1
   ${If} $0 != $1
-    MessageBox MB_OK|MB_ICONSTOP "当前卸载路径不是 Mineradio 专属目录，已阻止卸载以避免误删其它文件。$\r$\n$\r$\n当前路径：$INSTDIR$\r$\n安全路径应为：$0"
+    MessageBox MB_OK|MB_ICONSTOP "当前卸载路径不是 Mineradio Remix 专属目录，已阻止卸载以避免误删其它文件。$\r$\n$\r$\n当前路径：$INSTDIR$\r$\n安全路径应为：$0"
     SetErrorLevel 2
     Quit
   ${EndIf}
@@ -983,7 +983,7 @@ Function un.MineradioValidateUninstallDir
   Call un.MineradioInstallDirLooksOwned
   Pop $0
   ${If} $0 != "1"
-    MessageBox MB_OK|MB_ICONSTOP "无法确认当前目录属于 Mineradio，已阻止卸载以避免误删其它文件。$\r$\n$\r$\n当前路径：$INSTDIR"
+    MessageBox MB_OK|MB_ICONSTOP "无法确认当前目录属于 Mineradio Remix，已阻止卸载以避免误删其它文件。$\r$\n$\r$\n当前路径：$INSTDIR"
     SetErrorLevel 2
     Quit
   ${EndIf}
