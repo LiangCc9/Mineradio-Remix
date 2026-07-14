@@ -1,7 +1,7 @@
 {
   "name": "mineradio-remix",
   "productName": "Mineradio Remix",
-  "version": "1.1.1",
+  "version": "2.91.0",
   "description": "基于 Mineradio 的非官方个人二创版：网易云音乐、粒子封面、电影歌词与克制的情绪视觉。",
   "author": "LiangCc9",
   "license": "GPL-3.0-only",
@@ -63,7 +63,7 @@
       "uninstallerSidebar": "build/installerSidebar.bmp",
       "installerHeader": "build/installerHeader.bmp",
       "include": "build/installer.nsh",
-      "artifactName": "Mineradio-Remix-${version}-Setup.${ext}"
+      "artifactName": "Mineradio-Remix-v2.91-Setup.${ext}"
     },
     "publish": [
       {
