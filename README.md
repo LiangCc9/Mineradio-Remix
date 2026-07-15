@@ -34,7 +34,11 @@ npm run build:win:dir
 npm run build:win
 ```
 
-构建产物位于 `dist/`。当前未配置代码签名，因此 Windows 可能显示“未知发布者”。
+构建产物位于 `dist/`。当前 v2.91 安装包发布于代码签名接入之前，因此 Windows 可能显示“未知发布者”。
+
+## 代码签名
+
+本项目申请使用 [SignPath Foundation](https://signpath.org/) 为开源项目提供的免费代码签名服务。后续已签名发行版会在 GitHub Releases 中明确标注；签名只用于验证发布者与安装包完整性。
 
 ## 数据、字体与授权
 
