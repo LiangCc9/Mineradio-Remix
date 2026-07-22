@@ -51,7 +51,7 @@ var userPlaylists = [], myPodcastCollections = [], myPodcastItems = {}, playlist
 var USER_LIBRARY_CACHE_KEY = 'mineradio-user-library-cache-v1';
 var PLAYLIST_TRACK_CACHE_KEY = 'mineradio-playlist-track-cache-v1';
 var LYRIC_PERSISTENT_CACHE_KEY = 'mineradio-lyric-cache-v1';
-var COVER_PALETTE_CACHE_KEY = 'mineradio-cover-palette-cache-v1';
+var COVER_PALETTE_CACHE_KEY = 'mineradio-cover-palette-cache-v2';
 var USER_LIBRARY_CACHE_TTL_MS = 10 * 60 * 1000;
 var PLAYLIST_TRACK_PERSIST_TTL_MS = 7 * 86400000;
 var LYRIC_PERSISTENT_CACHE_TTL_MS = 30 * 86400000;
@@ -513,6 +513,7 @@ var playlistPanelPinned = readBooleanPreference(PLAYLIST_PANEL_PIN_STORE_KEY, fa
 var playlistPanelSide = readPlaylistPanelSidePreference();
 var playlistPanelPreferredSide = playlistPanelSide;
 var playlistPanelSideSwitchTimer = 0;
+var playlistPanelPreferredSideResetTimer = 0;
 var playlistPanelAutoRevealSuppressed = false;
 var userCapsuleAutoHide = readBooleanPreference(USER_CAPSULE_AUTO_HIDE_STORE_KEY, false);
 var fxFabAutoHide = readBooleanPreference(FX_FAB_AUTO_HIDE_STORE_KEY, false);
@@ -2215,10 +2216,19 @@ var deferredShelfRebuild = { raf: 0, reason: '', asyncCards: true, token: 0 };
 
 
 
-window.addEventListener('blur', clearShelfPreviewOnPointerExit);
-document.addEventListener('mouseleave', clearShelfPreviewOnPointerExit);
+function clearTransientUiOnPointerExit() {
+  clearShelfPreviewOnPointerExit();
+  var panel = document.getElementById('playlist-panel');
+  if (panel && !playlistPanelPinned && (panel.classList.contains('peek') || panel.classList.contains('show'))) {
+    setPeek(panel, false, 'pl');
+    if (typeof setFocusZone === 'function') setFocusZone(null, true);
+  }
+}
+
+window.addEventListener('blur', clearTransientUiOnPointerExit);
+document.addEventListener('mouseleave', clearTransientUiOnPointerExit);
 document.addEventListener('mouseout', function(e) {
-  if (!e.relatedTarget && !e.toElement) clearShelfPreviewOnPointerExit();
+  if (!e.relatedTarget && !e.toElement) clearTransientUiOnPointerExit();
 });
 
 // ============================================================
@@ -2312,36 +2322,6 @@ renderer.domElement.addEventListener('click', function(e){
   } else if (mode === 'side' && shelfPinnedOpen) {
     setShelfPinnedOpen(false, true);
   }
-});
-
-renderer.domElement.addEventListener('contextmenu', function(e){
-  if (document.body.classList.contains('splash-active')) return;
-  if (isPointerOverUi(e)) return;
-  e.preventDefault();
-  e.stopPropagation();
-  if (typeof suppressBottomControlsForShelf === 'function') suppressBottomControlsForShelf(980);
-  if (!shelfManager) return;
-  var mode = shelfManager.getMode && shelfManager.getMode();
-  if (mode === 'off') {
-    setShelfMode('side');
-    mode = 'side';
-  }
-  if (mode !== 'side') return;
-  if (shelfManager.hasOpenContent && shelfManager.hasOpenContent()) {
-    var rc = raycasterFromPointerEvent(e);
-    var cl = shelfManager.getContentList && shelfManager.getContentList();
-    var rowHit = cl && cl.raycastRows ? cl.raycastRows(rc) : null;
-    if (rowHit && rowHit.row && rowHit.row.song && rowHit.row.song.id && rowHit.row.song.type !== 'podcast-radio') {
-      if (cl.pulseRow) cl.pulseRow(rowHit.row, 0.88);
-      queueDetailSongNext(rowHit.row.song);
-      return;
-    }
-    safeShelfCloseContent('shelf-context-toggle');
-    setShelfPinnedOpen(true, true);
-    return;
-  }
-  setShelfPinnedOpen(!shelfPinnedOpen, true);
-  if (!shelfPinnedOpen && typeof setFocusZone === 'function') setFocusZone(null, true);
 });
 
 // 滚轮: 在真实卡片或右侧窄热区内滚卡片; 否则保留给封面粒子/视角
@@ -3566,8 +3546,8 @@ var visualGuideStepsDiy = [
   {
     selector: '#playlist-panel',
     kicker: '03 / Library',
-    title: '左侧是完整歌单和队列',
-    body: '靠近左侧边缘可以打开歌单/队列面板，在这里管理队列、个人歌单和播客。'
+    title: '左右侧都能打开歌单和队列',
+    body: '靠近任一侧边缘都可以打开歌单/队列面板，在这里管理队列、个人歌单和播客。'
   },
   {
     selector: '#fx-panel',
@@ -3731,15 +3711,12 @@ document.addEventListener('keydown', function(e){
   else if (e.code === 'KeyF') toggleFullscreen();
 });
 
-// 鼠标右键 = 返回（上下文感知）。捕获阶段先于 3D 货架的右键处理：
-//   - 货架开启时（getMode!=='off' 或有展开内容）：放行，保留货架右键行为；
-//   - 否则：执行返回（关浮层 / 回到 Home），并阻止默认右键菜单。
+// 鼠标右键只负责“返回”。捕获阶段吞掉事件，避免画布或 Chromium
+// 再把它解释成 3D 货架操作 / 原生上下文菜单。
 document.addEventListener('contextmenu', function(e){
-  if (document.body.classList.contains('splash-active')) return;
-  if (isTypingTarget(e.target)) return;
-  if (diyPlayerMode) return; // DIY 模式下保留 3D 货架的右键操作，不抢占
   e.preventDefault();
-  e.stopPropagation();
+  e.stopImmediatePropagation();
+  if (document.body.classList.contains('splash-active')) return;
   performBackAction();
 }, true);
 
@@ -3757,11 +3734,6 @@ var peekTimers = { search:null, fx:null, pl:null };
 
 
 
-var secondaryPlaylistEdgeGuard = { enteredAt:0, timer:null, x:0, y:0, H:0 };
-var SECONDARY_PLAYLIST_EDGE_MIN_X = 36;
-var SECONDARY_PLAYLIST_EDGE_MAX_X = 96;
-var SECONDARY_PLAYLIST_EDGE_DWELL_MS = 220;
-var SECONDARY_PLAYLIST_SEAM_CLOSE_X = 28;
 
 
 
@@ -3793,13 +3765,15 @@ window.addEventListener('mousemove', function(e){
     var ppRectImm = ppOnImm ? pp.getBoundingClientRect() : null;
     var queueEdgeSideImm = playlistPanelEdgeTriggerSide(ex, ey, W, H);
     var inQueueTriggerImm = !!queueEdgeSideImm;
-    if (queueEdgeSideImm && !ppOnImm && !playlistPanelPinned) applyPlaylistPanelSide(queueEdgeSideImm, false, false);
+    if (queueEdgeSideImm && !playlistPanelPinned && queueEdgeSideImm !== playlistPanelSide) {
+      applyPlaylistPanelSide(queueEdgeSideImm, false, ppOnImm);
+    }
     var inQueuePanelImm = ppOnImm && ex >= ppRectImm.left - 18 && ex <= ppRectImm.right + 24 && ey >= ppRectImm.top - 22 && ey <= ppRectImm.bottom + 22;
     if (inQueueTriggerImm || inQueuePanelImm) setPeek(pp, true, 'pl');
-    else if (shouldClosePlaylistPanelFromPointer(ppOnImm, ex, ppRectImm)) setPeek(pp, false, 'pl');
+    else if (shouldClosePlaylistPanelFromPointer(ppOnImm, ex, ey, ppRectImm)) setPeek(pp, false, 'pl');
     var shelfCanFocusImm = !!(shelfManager && shelfManager.canInteract && shelfManager.canInteract());
     var newFocusImm = null;
-    var queueFocusImm = isPlaylistPanelFocusActive(inQueueTriggerImm, inQueuePanelImm, pp, ex, ppRectImm);
+    var queueFocusImm = isPlaylistPanelFocusActive(inQueueTriggerImm, inQueuePanelImm, pp, ex, ey, ppRectImm);
     var shelfHoverFocusImm = !!(shelfCanFocusImm && isSideShelfFocusHit(e));
     if (queueFocusImm) newFocusImm = 'queue';
     else if (shelfManager && shelfManager.hasOpenContent && shelfManager.hasOpenContent()) newFocusImm = 'shelf-detail';
@@ -3837,10 +3811,12 @@ window.addEventListener('mousemove', function(e){
   var queueEdgeSide = playlistPanelEdgeTriggerSide(ex, ey, W, H);
   if (queueEdgeSide === 'right' && (inFxFab || inFxPanel || inFxBridge)) queueEdgeSide = '';
   var inQueueTrigger = !!queueEdgeSide;
-  if (queueEdgeSide && !ppOn && !playlistPanelPinned) applyPlaylistPanelSide(queueEdgeSide, false, false);
+  if (queueEdgeSide && !playlistPanelPinned && queueEdgeSide !== playlistPanelSide) {
+    applyPlaylistPanelSide(queueEdgeSide, false, ppOn);
+  }
   var inQueuePanel = ppOn && ex >= ppRect.left - 18 && ex <= ppRect.right + 24 && ey >= ppRect.top - 22 && ey <= ppRect.bottom + 22;
   if (inQueueTrigger || inQueuePanel) setPeek(pp, true, 'pl');
-  else if (shouldClosePlaylistPanelFromPointer(ppOn, ex, ppRect)) setPeek(pp, false, 'pl');
+  else if (shouldClosePlaylistPanelFromPointer(ppOn, ex, ey, ppRect)) setPeek(pp, false, 'pl');
 
   // v8: 镜头跟拍触发判断
   //   - 队列面板 peek 时 → queue focus
@@ -3852,7 +3828,7 @@ window.addEventListener('mousemove', function(e){
   }
 
   var newFocus = null;
-  var queueFocusActive = isPlaylistPanelFocusActive(inQueueTrigger, inQueuePanel, pp, ex, ppRect);
+  var queueFocusActive = isPlaylistPanelFocusActive(inQueueTrigger, inQueuePanel, pp, ex, ey, ppRect);
   var shelfHoverFocus = !!(shelfCanFocus && isSideShelfFocusHit(e));
   if (queueFocusActive) {
     newFocus = 'queue';

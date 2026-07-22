@@ -1661,7 +1661,10 @@ function performBackAction() {
   var fxPanel = document.getElementById('fx-panel');
   if (fxPanel && fxPanel.classList.contains('show')) { toggleFxPanel(false); return true; }
   var plPanel = document.getElementById('playlist-panel');
-  if (plPanel && plPanel.classList.contains('show')) { togglePlaylistPanel(false); return true; }
+  if (plPanel && (plPanel.classList.contains('show') || plPanel.classList.contains('peek') || plPanel.classList.contains('pinned'))) {
+    closePlaylistPanelManually();
+    return true;
+  }
   if (!emptyHomeActive) { goHome(); return true; }
   return false;
 }
@@ -1677,6 +1680,10 @@ function setPeek(el, on, key) {
     var wasPeek = el.classList.contains('peek');
     var wasOpen = wasPeek || el.classList.contains('show');
     if (peekTimers[key]) { clearTimeout(peekTimers[key]); peekTimers[key] = null; }
+    if (key === 'pl' && playlistPanelPreferredSideResetTimer) {
+      clearTimeout(playlistPanelPreferredSideResetTimer);
+      playlistPanelPreferredSideResetTimer = 0;
+    }
     if (key === 'fx') el.classList.remove('closing');
     if (key === 'pl' && !wasOpen && !playQueue.length && queueViewTab === 'queue') switchPlaylistTab('playlists');
     if (key === 'pl' && !wasOpen && playQueue.length && currentIdx >= 0) {
@@ -1701,9 +1708,16 @@ function setPeek(el, on, key) {
     // Re-entering through the `on` branch still cancels it immediately.
     if (peekTimers[key]) return;
     peekTimers[key] = setTimeout(function(){
-      el.classList.remove('peek');
+      if (key === 'pl' && !playlistPanelPinned) el.classList.remove('peek', 'show');
+      else el.classList.remove('peek');
       if (key === 'pl' && !el.classList.contains('show') && !playlistPanelPinned && typeof playlistPanelPreferredSide !== 'undefined') {
-        applyPlaylistPanelSide(playlistPanelPreferredSide, false, false);
+        if (playlistPanelPreferredSideResetTimer) clearTimeout(playlistPanelPreferredSideResetTimer);
+        playlistPanelPreferredSideResetTimer = setTimeout(function(){
+          playlistPanelPreferredSideResetTimer = 0;
+          if (!el.classList.contains('peek') && !el.classList.contains('show') && !playlistPanelPinned) {
+            applyPlaylistPanelSide(playlistPanelPreferredSide, false, false);
+          }
+        }, 390);
       }
       if (key === 'fx') {
         var fabOff = document.getElementById('fx-fab');
@@ -1795,97 +1809,40 @@ function maybeShowUploadTipOnce() {
   }, 6800);
 }
 
-function isSecondaryLeftDisplaySeamGuardActive() {
-  var state = (typeof desktopWindowState !== 'undefined' && desktopWindowState) ? desktopWindowState : {};
-  return !!(window.desktopWindow && window.desktopWindow.isDesktop && state.isPrimaryDisplay === false && state.hasDisplayOnLeft);
-}
-
-function resetSecondaryPlaylistEdgeGuard() {
-  if (secondaryPlaylistEdgeGuard.timer) {
-    clearTimeout(secondaryPlaylistEdgeGuard.timer);
-    secondaryPlaylistEdgeGuard.timer = null;
-  }
-  secondaryPlaylistEdgeGuard.enteredAt = 0;
-}
-
-function isSecondaryPlaylistSafeBandPoint(ex, ey, H) {
-  return ey > 132 && ey < H - 132 && ex >= SECONDARY_PLAYLIST_EDGE_MIN_X && ex < SECONDARY_PLAYLIST_EDGE_MAX_X;
-}
-
-function armSecondaryPlaylistEdgeDwell() {
-  if (secondaryPlaylistEdgeGuard.timer) return;
-  secondaryPlaylistEdgeGuard.timer = setTimeout(function(){
-    secondaryPlaylistEdgeGuard.timer = null;
-    if (!isSecondaryLeftDisplaySeamGuardActive()) return;
-    if (!isSecondaryPlaylistSafeBandPoint(secondaryPlaylistEdgeGuard.x, secondaryPlaylistEdgeGuard.y, secondaryPlaylistEdgeGuard.H)) return;
-    var panel = document.getElementById('playlist-panel');
-    if (panel) setPeek(panel, true, 'pl');
-  }, SECONDARY_PLAYLIST_EDGE_DWELL_MS);
-}
-
 function playlistPanelEdgeTriggerSide(ex, ey, W, H) {
   // In DIY mode the lower-right corner belongs to the visual-console FAB.
   // Reserving the same reveal zone used by updateFxFabAutoHideFromPointer()
   // prevents the right-side queue from opening first and blocking the FAB.
   if (!immersiveMode && diyPlayerMode && ex > W - 126 && ey > H - 158) {
-    resetSecondaryPlaylistEdgeGuard();
     return '';
   }
   var inVerticalBand = ey > 132 && ey < H - 132;
-  if (!inVerticalBand) {
-    resetSecondaryPlaylistEdgeGuard();
-    return '';
-  }
+  if (!inVerticalBand) return '';
   if (playlistPanelAutoRevealSuppressed) {
     var stillNearClosedEdge = playlistPanelSide === 'right' ? ex > W - 112 : ex < 112;
-    if (stillNearClosedEdge) {
-      resetSecondaryPlaylistEdgeGuard();
-      return '';
-    }
+    if (stillNearClosedEdge) return '';
     playlistPanelAutoRevealSuppressed = false;
   }
-  if (ex > W - 78 && ex <= W - 14) {
-    resetSecondaryPlaylistEdgeGuard();
-    return 'right';
-  }
-  if (!isSecondaryLeftDisplaySeamGuardActive()) {
-    return ex >= 14 && ex < 78 ? 'left' : '';
-  }
-  var inSafeBand = isSecondaryPlaylistSafeBandPoint(ex, ey, H);
-  if (!inSafeBand) {
-    resetSecondaryPlaylistEdgeGuard();
-    return '';
-  }
-  secondaryPlaylistEdgeGuard.x = ex;
-  secondaryPlaylistEdgeGuard.y = ey;
-  secondaryPlaylistEdgeGuard.H = H;
-  var now = performance.now();
-  if (!secondaryPlaylistEdgeGuard.enteredAt) secondaryPlaylistEdgeGuard.enteredAt = now;
-  armSecondaryPlaylistEdgeDwell();
-  return now - secondaryPlaylistEdgeGuard.enteredAt >= SECONDARY_PLAYLIST_EDGE_DWELL_MS ? 'left' : '';
+  if (ex >= W - 82) return 'right';
+  if (ex <= 82) return 'left';
+  return '';
 }
 
-function playlistPanelExitPadding() {
-  return playlistPanelSide === 'left' && isSecondaryLeftDisplaySeamGuardActive() ? 34 : 72;
+function shouldClosePlaylistPanelFromPointer(ppOn, ex, ey, ppRect) {
+  if (!ppOn || !ppRect) return false;
+  if (ey < ppRect.top - 22 || ey > ppRect.bottom + 22) return true;
+  if (playlistPanelSide === 'right') return ex < ppRect.left - 72;
+  return ex > ppRect.right + 72;
 }
 
-function playlistPanelFocusPadding() {
-  return playlistPanelSide === 'left' && isSecondaryLeftDisplaySeamGuardActive() ? 28 : 52;
-}
-
-function shouldClosePlaylistPanelFromPointer(ppOn, ex, ppRect) {
-  if (!ppOn) return false;
-  if (playlistPanelSide === 'right') return ex < ppRect.left - playlistPanelExitPadding();
-  if (isSecondaryLeftDisplaySeamGuardActive() && ex < SECONDARY_PLAYLIST_SEAM_CLOSE_X) return true;
-  return ex > ppRect.right + playlistPanelExitPadding();
-}
-
-function isPlaylistPanelFocusActive(inTrigger, inPanel, pp, ex, ppRect) {
-  if (playlistPanelSide === 'left' && isSecondaryLeftDisplaySeamGuardActive() && ex < SECONDARY_PLAYLIST_SEAM_CLOSE_X) return false;
-  var bridgeActive = pp && (pp.classList.contains('peek') || pp.classList.contains('show')) && (playlistPanelSide === 'right'
-    ? ex > ppRect.left - playlistPanelFocusPadding()
-    : ex < ppRect.right + playlistPanelFocusPadding());
-  return inTrigger || inPanel || bridgeActive;
+function isPlaylistPanelFocusActive(inTrigger, inPanel, pp, ex, ey, ppRect) {
+  if (inTrigger || inPanel) return true;
+  if (!pp || !ppRect || (!pp.classList.contains('peek') && !pp.classList.contains('show'))) return false;
+  var inVerticalBridge = ey >= ppRect.top - 22 && ey <= ppRect.bottom + 22;
+  var inHorizontalBridge = playlistPanelSide === 'right'
+    ? ex > ppRect.left - 52
+    : ex < ppRect.right + 52;
+  return inVerticalBridge && inHorizontalBridge;
 }
 
 function splashClamp01(v) { return Math.max(0, Math.min(1, v)); }

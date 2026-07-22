@@ -1910,6 +1910,8 @@ function lyricPaletteFromHex(hex) {
     highlight: rgbCss(highlight),
     shadow: darkText ? 'rgba(0,6,10,0.46)' : 'rgba(248,253,255,0.34)',
     glow: rgbCss(primary, 0.26),
+    glowColor: rgbCss(secondary),
+    contrastMode: l < 0.48 ? 'dark' : 'light',
   };
 }
 
@@ -1920,6 +1922,8 @@ function silverBlueLyricPalette() {
     highlight: '#eef7ff',
     shadow: 'rgba(0,7,12,0.48)',
     glow: 'rgba(138,190,255,0.26)',
+    glowColor: '#9db8cf',
+    contrastMode: 'light',
   };
 }
 
@@ -1955,20 +1959,52 @@ function setLyricSparkColor(data, color) {
   else if (data.sparkMat.color) data.sparkMat.color.copy(color);
 }
 
+function lyricPaletteInkMode(pal) {
+  if (pal && (pal.contrastMode === 'light' || pal.contrastMode === 'dark')) return pal.contrastMode;
+  var c = cssColorToThreeColor(pal && pal.primary, '#d6f8ff');
+  return c.r * 0.299 + c.g * 0.587 + c.b * 0.114 < 0.48 ? 'dark' : 'light';
+}
+
+function lyricReadabilityColor(pal) {
+  return new THREE.Color(lyricPaletteInkMode(pal) === 'dark' ? '#f7f7f2' : '#050608');
+}
+
+function applyLyricTranslationPalette(mat, pal) {
+  if (!mat || !mat.uniforms) return;
+  pal = pal || {};
+  var darkInk = lyricPaletteInkMode(pal) === 'dark';
+  // Translation follows the Auto hue but is nudged toward a neutral of the same
+  // brightness, so it stays secondary without turning into muddy grey.
+  var base = cssColorToThreeColor(pal.secondary || pal.primary, darkInk ? '#20252a' : '#dce5ea')
+    .lerp(new THREE.Color(darkInk ? '#181a1d' : '#edf0ed'), 0.18);
+  var hi = cssColorToThreeColor(pal.highlight || pal.primary, darkInk ? '#343a40' : '#f7faf7')
+    .lerp(new THREE.Color(darkInk ? '#24272b' : '#f7f7f2'), 0.12);
+  if (mat.uniforms.uBaseColor) mat.uniforms.uBaseColor.value.copy(base);
+  if (mat.uniforms.uHiColor) mat.uniforms.uHiColor.value.copy(hi);
+  if (mat.uniforms.uGlowColor) mat.uniforms.uGlowColor.value.copy(base.clone().multiplyScalar(0.52));
+  if (mat.uniforms.uSolarColor) mat.uniforms.uSolarColor.value.copy(hi);
+  if (mat.uniforms.uSolar) mat.uniforms.uSolar.value = 0;
+  mat.needsUpdate = true;
+}
+
 function applyLyricPaletteToMesh(mesh) {
   if (!mesh || !mesh.userData || !mesh.userData.lyric) return;
   var pal = stageLyrics.palette || {};
   var data = mesh.userData.lyric;
   if (data.textMat && data.textMat.uniforms) {
     var u = data.textMat.uniforms;
-    if (u.uBaseColor) u.uBaseColor.value.copy(lyricThreeColor(pal.primary, '#d6f8ff', 0.38));
-    if (u.uHiColor) u.uHiColor.value.copy(lyricThreeColor(pal.highlight || pal.primary, '#fff0b8', 0.48));
+    if (u.uBaseColor) u.uBaseColor.value.copy(cssColorToThreeColor(pal.primary, '#d6f8ff'));
+    if (u.uHiColor) u.uHiColor.value.copy(cssColorToThreeColor(pal.highlight || pal.primary, '#fff0b8'));
     if (u.uGlowColor) u.uGlowColor.value.copy(lyricThreeColor(pal.glowColor || pal.secondary || pal.primary, '#9cffdf', 0.36));
     if (u.uSolarColor) u.uSolarColor.value.copy(lyricThreeColor(pal.highlight || pal.secondary || pal.primary, '#fff0b8', 0.50));
     if (u.uSolar && !isFinite(u.uSolar.value)) u.uSolar.value = 0;
     if (u.uOpacity && !isFinite(u.uOpacity.value)) u.uOpacity.value = 0;
     data.textMat.needsUpdate = true;
   }
+  applyLyricTranslationPalette(data.transMat, pal);
+  var readabilityColor = lyricReadabilityColor(pal);
+  if (data.readabilityMat && data.readabilityMat.color) data.readabilityMat.color.copy(readabilityColor);
+  if (data.transReadabilityMat && data.transReadabilityMat.color) data.transReadabilityMat.color.copy(readabilityColor);
   if (data.glowMat) data.glowMat.color.copy(lyricThreeColor(pal.glowColor || pal.secondary || pal.primary, '#9cffdf', 0.36));
   if (data.sparkMat) setLyricSparkColor(data, lyricThreeColor(pal.highlight || pal.secondary || pal.primary, '#fff0b8', 0.46));
   if (data.sunMat) data.sunMat.color.copy(lyricThreeColor(pal.highlight || pal.secondary || pal.primary, '#fff0b8', 0.50));
@@ -1981,7 +2017,10 @@ function effectiveLyricPalette(pal) {
     secondary: src.secondary || '#9cffdf',
     highlight: src.highlight || '#eef7ff',
     shadow: src.shadow || 'rgba(2,8,12,0.42)',
-    glow: src.glow || 'rgba(143,233,255,0.34)'
+    glow: src.glow || 'rgba(143,233,255,0.34)',
+    glowColor: src.glowColor || '',
+    contrastMode: src.contrastMode === 'dark' ? 'dark' : 'light',
+    busy: !!src.busy
   };
   if (fx.lyricHighlightMode === 'custom') {
     var hi = lyricPaletteFromHex(fx.lyricHighlightColor);
@@ -2009,40 +2048,59 @@ function setStageLyricPalette(pal) {
   syncSkullParticleColors();
 }
 
-function lyricTextPaletteFromHsl(hsl, avgL, chroma) {
-  if (avgL < 0.16 || chroma < 0.08) {
-    return silverBlueLyricPalette();
-  }
-  var hue = hsl.h;
-  if (avgL < 0.30 && (hue < 0.06 || hue > 0.86 || (hue > 0.75 && hue < 0.86))) return silverBlueLyricPalette();
-  if (avgL > 0.82 && chroma < 0.12) {
-    return {
-      primary: '#064b5b',
-      secondary: '#168c88',
-      highlight: '#315f68',
-      shadow: 'rgba(255,255,255,0.48)',
-      glow: 'rgba(143,233,255,0.14)',
-    };
-  }
-  var lightText = avgL < 0.52;
-  var s = Math.max(0.42, Math.min(0.78, hsl.s + 0.16));
-  var c1 = hslToRgb(hsl.h, s, lightText ? 0.74 : 0.34);
-  var c2 = hslToRgb((hsl.h + 0.08) % 1, Math.max(0.36, s - 0.10), lightText ? 0.62 : 0.46);
+function lyricTextPaletteFromHsl(hsl, lightStats, chroma) {
+  var stats = typeof lightStats === 'number' ? { avgL:lightStats } : (lightStats || {});
+  var avgL = clampRange(Number(stats.avgL) || 0, 0, 1);
+  var p20 = clampRange(stats.p20 == null ? avgL : Number(stats.p20), 0, 1);
+  var p80 = clampRange(stats.p80 == null ? avgL : Number(stats.p80), 0, 1);
+  var darkRatio = clampRange(Number(stats.darkRatio) || 0, 0, 1);
+  var brightRatio = clampRange(Number(stats.brightRatio) || 0, 0, 1);
+  var spread = Math.max(0, p80 - p20);
+
+  // Covers become sparse particles over the dark stage, so Auto favours a pale
+  // ink unless the source is clearly and consistently bright. This avoids the old
+  // failure where a warm cover produced warm lyrics on top of the same particles.
+  var lightScore = (1 - avgL) * 0.48 + (1 - p20) * 0.30 + darkRatio * 0.22;
+  var darkScore = avgL * 0.48 + p80 * 0.30 + brightRatio * 0.22;
+  var lightText = lightScore >= darkScore;
+  if (avgL < 0.62 || darkRatio > 0.34) lightText = true;
+  if (avgL > 0.70 && brightRatio > 0.56 && darkRatio < 0.18) lightText = false;
+
+  // Use a low-saturation complementary tint. It still belongs to the cover, but
+  // no longer disappears into particles that share the cover's dominant hue.
+  var sourceChroma = clampRange(Number(chroma) || 0, 0, 1);
+  var complexCover = spread > 0.42 || (darkRatio > 0.18 && brightRatio > 0.18);
+  var hueShift = sourceChroma > 0.10 ? (complexCover ? 0.42 : 0.08) : 0.06;
+  var hue = (hsl.h + hueShift) % 1;
+  var s = sourceChroma < 0.10
+    ? 0.07
+    : (complexCover ? clampRange(0.22 + hsl.s * 0.18, 0.22, 0.40) : clampRange(0.18 + hsl.s * 0.24, 0.18, 0.46));
+  // Even a bright cover is rendered as sparse points over a dark stage. The
+  // alternative branch therefore uses a coloured mid-tone, never near-black ink.
+  var primaryL = lightText ? (complexCover ? 0.80 : 0.86) : (complexCover ? 0.38 : 0.34);
+  var secondaryL = lightText ? (complexCover ? 0.70 : 0.75) : (complexCover ? 0.46 : 0.43);
+  var highlightL = lightText ? (complexCover ? 0.91 : 0.95) : (complexCover ? 0.56 : 0.52);
+  var c1 = hslToRgb(hue, s, primaryL);
+  var c2 = hslToRgb((hue + 0.025) % 1, s * 0.76, secondaryL);
+  var glowRgb = hslToRgb(hsl.h, clampRange(0.18 + hsl.s * 0.34, 0.18, 0.54), lightText ? 0.58 : 0.42);
   return {
     primary: rgbCss(c1),
     secondary: rgbCss(c2),
-    highlight: rgbCss(hslToRgb((hsl.h + 0.03) % 1, Math.max(0.28, s - 0.18), lightText ? 0.86 : 0.58)),
-    shadow: lightText ? 'rgba(0,6,10,0.44)' : 'rgba(248,253,255,0.40)',
-    glow: rgbCss(c1, lightText ? 0.24 : 0.14),
+    highlight: rgbCss(hslToRgb((hue + 0.015) % 1, s * 0.64, highlightL)),
+    shadow: lightText ? 'rgba(0,4,8,0.16)' : 'rgba(255,255,250,0.18)',
+    glow: rgbCss(c1, lightText ? 0.12 : 0.08),
+    glowColor: rgbCss(glowRgb),
+    contrastMode: lightText ? 'light' : 'dark',
+    busy: complexCover,
   };
 }
 
 function readCoverPaletteCacheStore() {
   if (coverPaletteCacheMemory) return coverPaletteCacheMemory;
-  var store = { version: 1, entries: {} };
+  var store = { version: 2, entries: {} };
   try {
     var parsed = JSON.parse(localStorage.getItem(COVER_PALETTE_CACHE_KEY) || 'null');
-    if (parsed && parsed.version === 1 && parsed.entries && typeof parsed.entries === 'object') store = parsed;
+    if (parsed && parsed.version === 2 && parsed.entries && typeof parsed.entries === 'object') store = parsed;
   } catch (e) {}
   var now = Date.now();
   Object.keys(store.entries).forEach(function(key){
@@ -2097,6 +2155,7 @@ function updateLyricPaletteFromCover(coverCanvas, paletteKey) {
     var img = ctx.getImageData(0, 0, coverCanvas.width, coverCanvas.height).data;
     var w = coverCanvas.width, h = coverCanvas.height;
     var sumR = 0, sumG = 0, sumB = 0, count = 0;
+    var luminances = [], darkCount = 0, brightCount = 0;
     var best = { score:-1, r:143, g:233, b:255 };
     for (var y = 0; y < h; y += 8) {
       for (var x = 0; x < w; x += 8) {
@@ -2109,13 +2168,27 @@ function updateLyricPaletteFromCover(coverCanvas, paletteKey) {
         var edgePenalty = Math.abs(lum - 0.5);
         var score = chroma * 1.6 + (0.5 - edgePenalty) * 0.45;
         sumR += r; sumG += g; sumB += b; count++;
-        if (lum > 0.08 && lum < 0.92 && score > best.score) best = { score:score, r:r, g:g, b:b };
+        luminances.push(lum);
+        if (lum < 0.28) darkCount++;
+        if (lum > 0.72) brightCount++;
+        if (lum > 0.08 && lum < 0.92 && score > best.score) best = { score:score, r:r, g:g, b:b, chroma:chroma };
       }
     }
     if (!count) return;
     var avgL = (sumR / count * 0.299 + sumG / count * 0.587 + sumB / count * 0.114) / 255;
+    luminances.sort(function(a, b){ return a - b; });
+    function lyricLumPercentile(ratio) {
+      return luminances[Math.max(0, Math.min(luminances.length - 1, Math.round((luminances.length - 1) * ratio)))] || avgL;
+    }
+    var lightStats = {
+      avgL:avgL,
+      p20:lyricLumPercentile(0.20),
+      p80:lyricLumPercentile(0.80),
+      darkRatio:darkCount / count,
+      brightRatio:brightCount / count
+    };
     var hsl = rgbToHsl(best.r, best.g, best.b);
-    stageLyrics.coverPalette = lyricTextPaletteFromHsl(hsl, avgL, Math.max(0, best.score));
+    stageLyrics.coverPalette = lyricTextPaletteFromHsl(hsl, lightStats, Math.max(0, best.chroma || 0));
     if (fx.lyricColorMode !== 'custom') setStageLyricPalette(stageLyrics.coverPalette);
     // 同一张封面的主色同时驱动歌词与播放器高亮；限制亮度，避免深色封面让控件不可见。
     var accentRgb = hslToRgb(hsl.h, Math.max(0.42, Math.min(0.82, hsl.s)), Math.max(0.48, Math.min(0.68, hsl.l)));
@@ -2185,7 +2258,8 @@ function lyricThreeColor(css, fallback, minLum) {
   return c;
 }
 
-function makeLyricMask(text) {
+function makeLyricMask(text, options) {
+  options = options || {};
   var canvas = document.createElement('canvas');
   var W = 2048, H = 384;
   canvas.width = W; canvas.height = H;
@@ -2228,7 +2302,9 @@ function makeLyricMask(text) {
       lyricFillText(ctx, lines[di], x, y0 + di * lineHeight, fontSize);
     }
   }
-  applyStonePrintTexture(ctx, W, H, fontSize);
+  // The stone-print erosion reads well on the large headline, but its missing
+  // pixels collapse once the translation plane is scaled down.
+  if (!options.cleanEdges) applyStonePrintTexture(ctx, W, H, fontSize);
   var tex = new THREE.CanvasTexture(canvas);
   tex.minFilter = THREE.LinearFilter;
   tex.magFilter = THREE.LinearFilter;
@@ -2271,37 +2347,22 @@ function makeLyricReadabilityTexture(mask) {
     }
   }
 
-  // Black/white readability layer: text-shaped only, no rectangular backing.
+  // A very soft glyph-shaped halo is kept only as insurance for Custom colours.
+  // Auto mode gets its separation from the palette algorithm, not a visible edge.
   ctx.save();
-  ctx.filter = 'blur(14px)';
-  ctx.globalAlpha = 0.18;
-  ctx.lineWidth = Math.max(18, fontSize * 0.16);
-  ctx.strokeStyle = 'rgba(0,0,0,1)';
-  strokeLines(0, fontSize * 0.018);
-  ctx.restore();
-
-  ctx.save();
-  ctx.filter = 'blur(5px)';
-  ctx.globalAlpha = 0.32;
-  ctx.lineWidth = Math.max(9, fontSize * 0.075);
-  ctx.strokeStyle = 'rgba(0,0,0,1)';
+  ctx.filter = 'blur(10px)';
+  ctx.globalAlpha = 0.10;
+  ctx.lineWidth = Math.max(14, fontSize * 0.12);
+  ctx.strokeStyle = 'rgba(255,255,255,1)';
   strokeLines(0, fontSize * 0.012);
   ctx.restore();
 
   ctx.save();
-  ctx.filter = 'blur(4px)';
-  ctx.globalAlpha = 0.15;
-  ctx.lineWidth = Math.max(9, fontSize * 0.070);
+  ctx.filter = 'blur(2px)';
+  ctx.globalAlpha = 0.16;
+  ctx.lineWidth = Math.max(5, fontSize * 0.045);
   ctx.strokeStyle = 'rgba(255,255,255,1)';
-  strokeLines(0, 0);
-  ctx.restore();
-
-  ctx.save();
-  ctx.filter = 'blur(1.2px)';
-  ctx.globalAlpha = 0.26;
-  ctx.lineWidth = Math.max(3.2, fontSize * 0.030);
-  ctx.strokeStyle = 'rgba(255,255,255,1)';
-  strokeLines(0, 0);
+  strokeLines(0, fontSize * 0.006);
   ctx.restore();
 
   var tex = new THREE.CanvasTexture(canvas);
@@ -2488,8 +2549,8 @@ function makeLyricShaderMaterial(mask, pal) {
       uTextMin: { value: mask.textMin },
       uTextMax: { value: mask.textMax },
       uOpacity: { value: 0 },
-      uBaseColor: { value: lyricThreeColor(pal.primary, '#d6f8ff', 0.38) },
-      uHiColor: { value: lyricThreeColor(pal.highlight || pal.primary, '#fff0b8', 0.48) },
+      uBaseColor: { value: cssColorToThreeColor(pal.primary, '#d6f8ff') },
+      uHiColor: { value: cssColorToThreeColor(pal.highlight || pal.primary, '#fff0b8') },
       uGlowColor: { value: lyricThreeColor(pal.glowColor || pal.secondary, '#9cffdf', 0.36) },
       uSolarColor: { value: lyricThreeColor(pal.highlight || pal.secondary || pal.primary, '#fff0b8', 0.50) },
       uFeather: { value: lyricsHasNativeKaraoke ? 0.030 : 0.055 },
@@ -2515,8 +2576,6 @@ function makeLyricShaderMaterial(mask, pal) {
       '  vec3 solar = uSolarColor;',
       '  color = mix(color, color + solar * 0.34, uSolar * (0.25 + filled * 0.45));',
       '  color += solar * edge * uSolar * 0.22;',
-      '  float lum = dot(color, vec3(0.299, 0.587, 0.114));',
-      '  color += vec3(max(0.0, 0.30 - lum));',
       '  gl_FragColor = vec4(color, mask * uOpacity);',
       '}',
     ].join('\n'),
@@ -2574,7 +2633,7 @@ function buildLyricMesh(text, trans) {
   var readabilityTex = makeLyricReadabilityTexture(mask);
   var readabilityMat = new THREE.MeshBasicMaterial({
     map: readabilityTex, transparent:true, opacity:0, depthWrite:false, depthTest:false,
-    side:THREE.DoubleSide
+    side:THREE.DoubleSide, color:lyricReadabilityColor(pal)
   });
   var readability = new THREE.Mesh(new THREE.PlaneGeometry(worldW, worldH, 1, 1), readabilityMat);
   readability.renderOrder = 42;
@@ -2652,15 +2711,21 @@ function buildLyricMesh(text, trans) {
   // 翻译行：复用同一套着色器，保持点云舞台语言，但色彩、尺寸和时序都退到原文之后。
   trans = String(trans || '').replace(/\s+/g, ' ').trim();
   if (trans && trans !== text) {
-    var tMask = makeLyricMask(trans);
+    var tMask = makeLyricMask(trans, { cleanEdges:true });
     var tMat = makeLyricShaderMaterial(tMask, pal);
     tMat.uniforms.uProgress.value = 1;
-    var transMuted = lyricThreeColor(pal.secondary || pal.primary, '#a9bcc2', 0.22).lerp(new THREE.Color('#aab4ba'), 0.52);
-    tMat.uniforms.uBaseColor.value.copy(transMuted);
-    tMat.uniforms.uHiColor.value.copy(transMuted.clone().lerp(new THREE.Color('#e2e8ea'), 0.18));
-    tMat.uniforms.uGlowColor.value.copy(transMuted.clone().multiplyScalar(0.72));
-    tMat.uniforms.uSolar.value = 0;
+    applyLyricTranslationPalette(tMat, pal);
     var tWorldH = worldW * (tMask.height / tMask.width);
+    var tReadabilityTex = makeLyricReadabilityTexture(tMask);
+    var tReadabilityMat = new THREE.MeshBasicMaterial({
+      map:tReadabilityTex, transparent:true, opacity:0, depthWrite:false, depthTest:false,
+      side:THREE.DoubleSide, color:lyricReadabilityColor(pal)
+    });
+    var tReadability = new THREE.Mesh(new THREE.PlaneGeometry(worldW, tWorldH, 1, 1), tReadabilityMat);
+    tReadability.renderOrder = 42;
+    tReadability.scale.setScalar(0.58);
+    tReadability.position.set(0, -worldH * 0.66 - tWorldH * 0.04, -0.006);
+    group.add(tReadability);
     var tMesh = new THREE.Mesh(new THREE.PlaneGeometry(worldW, tWorldH, 1, 1), tMat);
     tMesh.renderOrder = 43;
     tMesh.scale.setScalar(0.58);
@@ -2668,6 +2733,8 @@ function buildLyricMesh(text, trans) {
     group.add(tMesh);
     group.userData.lyric.transMat = tMat;
     group.userData.lyric.transMesh = tMesh;
+    group.userData.lyric.transReadability = tReadability;
+    group.userData.lyric.transReadabilityMat = tReadabilityMat;
     group.userData.lyric.transDelay = 0.11;
   }
   updateLyricMeshProgress(group, 0);
@@ -2769,16 +2836,17 @@ function updateStageLyrics3D(dt) {
   var skullShelfDetailOpen = !!(fx && fx.preset === SKULL_PRESET_INDEX && shelfDetailOpen);
   var normalShelfDetailOpen = !!(shelfDetailOpen && !skullShelfDetailOpen);
   stageLyrics.group.renderOrder = shelfDetailOpen ? 24 : 38;
+  var autoLyricColor = fx.lyricColorMode !== 'custom';
   var shelfDetailLyricProfile = shelfDetailOpen ? {
     opacity: skullShelfDetailOpen ? 0.30 : 0.38,
-    readability: skullShelfDetailOpen ? 0.20 : 0.26,
+    readability: autoLyricColor ? 0 : (skullShelfDetailOpen ? 0.14 : 0.18),
     bloom: skullShelfDetailOpen ? 0.20 : 0.24,
     glowCap: skullShelfDetailOpen ? 0.050 : 0.070,
     outgoing: skullShelfDetailOpen ? 0.34 : 0.42,
     easeDown: 0.34
   } : {
     opacity: 0.96,
-    readability: 0.86,
+    readability: autoLyricColor ? 0 : 0.42,
     bloom: 1,
     glowCap: 1.0,
     outgoing: 1,
@@ -2919,8 +2987,12 @@ function updateStageLyrics3D(dt) {
         var transDelay = data.transDelay == null ? 0.11 : data.transDelay;
         var transReveal = clamp01((mesh.userData.age - transDelay) / 0.38);
         transReveal = transReveal * transReveal * (3 - 2 * transReveal);
-        var transOpacityTarget = opacity * 0.55 * transReveal;
+        var transOpacityTarget = opacity * 0.74 * transReveal;
         data.transMat.uniforms.uOpacity.value += (transOpacityTarget - data.transMat.uniforms.uOpacity.value) * 0.16;
+        if (data.transReadabilityMat) {
+          var transReadabilityTarget = autoLyricColor ? 0 : transOpacityTarget * (shelfDetailOpen ? 0.20 : 0.34);
+          data.transReadabilityMat.opacity += (transReadabilityTarget - data.transReadabilityMat.opacity) * 0.16;
+        }
       }
       if (data.readabilityMat) {
         var readabilityTarget = opacity * shelfDetailLyricProfile.readability;
@@ -3005,8 +3077,9 @@ function updateStageLyrics3D(dt) {
     }
     opacity = (1 - a) * 0.72 * shelfDetailLyricProfile.outgoing;
     if (data.textMat) data.textMat.uniforms.uOpacity.value = opacity;
-    if (data.transMat) data.transMat.uniforms.uOpacity.value += (opacity * 0.40 - data.transMat.uniforms.uOpacity.value) * 0.24;
-    if (data.readabilityMat) data.readabilityMat.opacity = opacity * (shelfDetailOpen ? shelfDetailLyricProfile.readability : 0.58);
+    if (data.transMat) data.transMat.uniforms.uOpacity.value += (opacity * 0.58 - data.transMat.uniforms.uOpacity.value) * 0.24;
+    if (data.transReadabilityMat) data.transReadabilityMat.opacity += ((autoLyricColor ? 0 : opacity * 0.22) - data.transReadabilityMat.opacity) * 0.24;
+    if (data.readabilityMat) data.readabilityMat.opacity = autoLyricColor ? 0 : opacity * (shelfDetailOpen ? shelfDetailLyricProfile.readability : 0.58);
     if (data.textMat && data.textMat.uniforms.uSolar) data.textMat.uniforms.uSolar.value *= shelfDetailOpen ? 0.72 : 0.86;
     if (data.glowMat) data.glowMat.opacity = lyricGlowStrength > 0 ? (shelfDetailOpen ? Math.min(shelfDetailLyricProfile.glowCap * 0.40, opacity * 0.05 * lyricGlowStrength) : opacity * 0.08 * lyricGlowStrength) : 0;
     if (data.sparkMat) {

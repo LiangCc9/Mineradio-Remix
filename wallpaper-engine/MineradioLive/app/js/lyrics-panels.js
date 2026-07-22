@@ -274,6 +274,11 @@ function miniQueueSkeleton() {
 function togglePlaylistPanel(force) {
   var el = document.getElementById('playlist-panel');
   if (!el) return;
+  var opening = force === true || (force !== false && !el.classList.contains('show'));
+  if (opening && typeof playlistPanelPreferredSideResetTimer !== 'undefined' && playlistPanelPreferredSideResetTimer) {
+    clearTimeout(playlistPanelPreferredSideResetTimer);
+    playlistPanelPreferredSideResetTimer = 0;
+  }
   if (force === false) {
     el.classList.remove('show', 'peek');
     if (peekTimers && peekTimers.pl) {
@@ -297,11 +302,7 @@ function togglePlaylistPanel(force) {
 function promotePlaylistPanelOpen() {
   var panel = document.getElementById('playlist-panel');
   if (!panel) return;
-  if (peekTimers && peekTimers.pl) {
-    clearTimeout(peekTimers.pl);
-    peekTimers.pl = null;
-  }
-  panel.classList.add('show', 'peek');
+  setPeek(panel, true, 'pl');
   playlistPanelAutoRevealSuppressed = false;
 }
 
